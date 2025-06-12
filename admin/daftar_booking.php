@@ -7,6 +7,25 @@ if (!isset($_SESSION['admin_id'])) {
 
 include('../config/database.php');
 
+$message = '';
+
+// Handle status update
+if (isset($_POST['update_status']) && isset($_POST['booking_id']) && isset($_POST['new_status'])) {
+    $booking_id = (int)$_POST['booking_id'];
+    $new_status = sanitize_input($_POST['new_status']);
+    
+    // Validasi status yang diizinkan
+    $allowed_status = ['pending', 'aktif', 'selesai', 'batal'];
+    if (in_array($new_status, $allowed_status)) {
+        $updateQuery = "UPDATE booking SET status = '$new_status' WHERE id = $booking_id";
+        if (mysqli_query($connection, $updateQuery)) {
+            $message = "Status booking berhasil diupdate ke: " . ucfirst($new_status);
+        } else {
+            $message = "Gagal mengupdate status booking!";
+        }
+    }
+}
+
 // Pagination
 $page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
 $limit = 15;
@@ -124,68 +143,6 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
             margin-bottom: 10px;
         }
 
-        .stats-section {
-            background: rgba(255, 255, 255, 0.95);
-            padding: 25px;
-            border-radius: var(--border-radius);
-            margin-bottom: 30px;
-            backdrop-filter: blur(10px);
-            box-shadow: var(--card-shadow);
-        }
-
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 20px;
-        }
-
-        .stat-item {
-            color: white;
-            padding: 20px;
-            border-radius: 10px;
-            text-align: center;
-            transition: transform 0.3s ease;
-        }
-
-        .stat-item:hover {
-            transform: translateY(-3px);
-        }
-
-        .stat-item.total {
-            background: linear-gradient(45deg, var(--info-color), #5dade2);
-        }
-
-        .stat-item.pending {
-            background: linear-gradient(45deg, var(--warning-color), #e67e22);
-        }
-
-        .stat-item.aktif {
-            background: linear-gradient(45deg, var(--success-color), #2ecc71);
-        }
-
-        .stat-item.selesai {
-            background: linear-gradient(45deg, #95a5a6, #7f8c8d);
-        }
-
-        .stat-item.batal {
-            background: linear-gradient(45deg, var(--danger-color), #c0392b);
-        }
-
-        .stat-item.revenue {
-            background: linear-gradient(45deg, #9b59b6, #8e44ad);
-        }
-
-        .stat-number {
-            font-size: 1.5rem;
-            font-weight: bold;
-            margin-bottom: 5px;
-        }
-
-        .stat-label {
-            font-size: 0.85rem;
-            opacity: 0.9;
-        }
-
         .filter-section {
             background: rgba(255, 255, 255, 0.95);
             padding: 25px;
@@ -268,8 +225,25 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
             background: linear-gradient(45deg, #95a5a6, #7f8c8d);
         }
 
+        .btn-success {
+            background: linear-gradient(45deg, var(--success-color), #2ecc71);
+        }
+
+        .btn-warning {
+            background: linear-gradient(45deg, var(--warning-color), #e67e22);
+        }
+
+        .btn-danger {
+            background: linear-gradient(45deg, var(--danger-color), #c0392b);
+        }
+
         .btn:hover {
             transform: translateY(-2px);
+        }
+
+        .btn-sm {
+            padding: 6px 12px;
+            font-size: 0.8rem;
         }
 
         .pagination {
@@ -319,6 +293,46 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
         .revenue-highlight {
             font-weight: bold;
             color: var(--success-color);
+        }
+
+        .status-update-form {
+            display: inline-block;
+            margin-left: 10px;
+        }
+
+        .status-select {
+            padding: 4px 8px;
+            border-radius: 8px;
+            border: 1px solid #ddd;
+            font-size: 0.8rem;
+            margin-right: 5px;
+        }
+
+        .alert {
+            border-radius: var(--border-radius);
+            padding: 15px 20px;
+            font-size: 0.95rem;
+            margin-bottom: 20px;
+            border: none;
+            display: flex;
+            align-items: center;
+        }
+
+        .alert i {
+            margin-right: 10px;
+            font-size: 1.1rem;
+        }
+
+        .alert-success {
+            background: linear-gradient(45deg, rgba(39, 174, 96, 0.1), rgba(46, 204, 113, 0.1));
+            color: var(--success-color);
+            border-left: 4px solid var(--success-color);
+        }
+
+        .alert-danger {
+            background: linear-gradient(45deg, rgba(231, 76, 60, 0.1), rgba(236, 112, 99, 0.1));
+            color: var(--danger-color);
+            border-left: 4px solid var(--danger-color);
         }
 
         /* Print Styles */
@@ -395,7 +409,7 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
                 color: #333;
             }
             
-            .btn {
+            .btn, .status-update-form {
                 display: none;
             }
         }
@@ -405,16 +419,17 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
                 padding: 15px;
             }
             
-            .stats-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
-            
             .table-responsive {
                 font-size: 0.8rem;
             }
             
             .table th, .table td {
                 padding: 8px 6px;
+            }
+
+            .status-update-form {
+                display: block;
+                margin: 10px 0;
             }
         }
 
@@ -439,6 +454,14 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
             <h1><i class="bi bi-list-check me-2"></i>Daftar Semua Booking</h1>
             <p class="mb-0">Monitor dan kelola semua booking lapangan futsal</p>
         </div>
+
+        <!-- Messages -->
+        <?php if ($message): ?>
+        <div class="alert <?php echo (strpos($message, 'berhasil') !== false) ? 'alert-success' : 'alert-danger'; ?> fade-in">
+            <i class="bi bi-<?php echo (strpos($message, 'berhasil') !== false) ? 'check-circle' : 'exclamation-circle'; ?>"></i>
+            <?php echo $message; ?>
+        </div>
+        <?php endif; ?>
 
         <!-- Filter Section -->
         <div class="filter-section fade-in">
@@ -516,7 +539,7 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
                             <th>Durasi</th>
                             <th>Kontak</th>
                             <th>Total</th>
-                            <th>Status</th>
+                            <th>Status & Aksi</th>
                             <th>Dibuat</th>
                         </tr>
                     </thead>
@@ -555,6 +578,23 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
                                     echo '<i class="bi bi-' . $icon . ' me-1"></i>' . ucfirst($booking['status']); 
                                     ?>
                                 </span>
+                                
+                                <!-- Status Update Form -->
+                                <div class="status-update-form">
+                                    <form method="POST" style="display: inline-block;">
+                                        <input type="hidden" name="booking_id" value="<?php echo $booking['id']; ?>">
+                                        <select name="new_status" class="status-select" onchange="confirmStatusUpdate(this.form, this.value, '<?php echo $booking['status']; ?>')">
+                                            <option value="">Ubah Status</option>
+                                            <?php if ($booking['status'] == 'pending'): ?>
+                                                <option value="aktif">→ Aktif</option>
+                                                <option value="batal">→ Batal</option>
+                                            <?php elseif ($booking['status'] == 'aktif'): ?>
+                                                <option value="selesai">→ Selesai</option>
+                                                <option value="batal">→ Batal</option>
+                                            <?php endif; ?>
+                                        </select>
+                                    </form>
+                                </div>
                             </td>
                             <td>
                                 <div><?php echo date('d/m/Y', strtotime($booking['created_at'])); ?></div>
@@ -676,6 +716,42 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     
     <script>
+        // Konfirmasi perubahan status
+        function confirmStatusUpdate(form, newStatus, currentStatus) {
+            if (newStatus === '') return;
+            
+            const statusNames = {
+                'pending': 'Pending',
+                'aktif': 'Aktif', 
+                'selesai': 'Selesai',
+                'batal': 'Dibatal'
+            };
+            
+            Swal.fire({
+                title: 'Konfirmasi Perubahan Status',
+                text: `Yakin ingin mengubah status dari "${statusNames[currentStatus]}" ke "${statusNames[newStatus]}"?`,
+                icon: 'warning',
+                showCancelButton: true,
+                confirmButtonColor: '#e74c3c',
+                cancelButtonColor: '#95a5a6',
+                confirmButtonText: 'Ya, Ubah!',
+                cancelButtonText: 'Batal'
+            }).then((result) => {
+                if (result.isConfirmed) {
+                    // Add hidden submit button and trigger it
+                    const submitBtn = document.createElement('input');
+                    submitBtn.type = 'hidden';
+                    submitBtn.name = 'update_status';
+                    submitBtn.value = '1';
+                    form.appendChild(submitBtn);
+                    form.submit();
+                } else {
+                    // Reset select value
+                    form.querySelector('select[name="new_status"]').value = '';
+                }
+            });
+        }
+
         // Enhanced Print Function - Only prints booking list
         function printBookingList() {
             // Show the printable content
@@ -690,6 +766,17 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
                 printContent.style.display = 'none';
             }, 1000);
         }
+
+        // Auto hide alerts after 5 seconds
+        setTimeout(function() {
+            const alerts = document.querySelectorAll('.alert');
+            alerts.forEach(function(alert) {
+                alert.style.opacity = '0';
+                setTimeout(function() {
+                    alert.remove();
+                }, 300);
+            });
+        }, 5000);
 
         // Auto refresh data every 60 seconds
         setInterval(function() {

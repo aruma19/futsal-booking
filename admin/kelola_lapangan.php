@@ -91,71 +91,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id'])) {
     }
 }
 
-// Ambil semua lapangan dengan status booking dinamis
+// Ambil semua lapangan
 $query = "SELECT * FROM lapangan ORDER BY id DESC";
 $result = mysqli_query($connection, $query);
 $lapangan = [];
 
 while($row = mysqli_fetch_assoc($result)) {
-    // Cek apakah ada booking aktif untuk lapangan ini hari ini
-    $today = date('Y-m-d');
-    $current_time = date('H:i:s');
-    
-    $checkBookingQuery = "
-        SELECT COUNT(*) as active_bookings 
-        FROM booking 
-        WHERE id_lapangan = {$row['id']} 
-        AND tanggal = '$today' 
-        AND status IN ('pending', 'aktif')
-        AND (
-            (jam <= '$current_time' AND ADDTIME(jam, SEC_TO_TIME(lama_sewa * 3600)) > '$current_time')
-            OR jam > '$current_time'
-        )
-    ";
-    
-    $checkResult = mysqli_query($connection, $checkBookingQuery);
-    $bookingData = mysqli_fetch_assoc($checkResult);
-    
-    // Set status dinamis berdasarkan booking dan status lapangan
-    if ($row['status'] == 'habis') {
-        // Jika admin set manual ke habis, tetap habis
-        $row['dynamic_status'] = 'habis';
-        $row['status_text'] = 'Maintenance/Tutup';
-        $row['status_class'] = 'maintenance';
-    } elseif ($bookingData['active_bookings'] > 0) {
-        $row['dynamic_status'] = 'dibooking';
-        $row['status_text'] = 'Sedang Dibooking';
-        $row['status_class'] = 'dibooking';
-    } else {
-        $row['dynamic_status'] = 'tersedia';
-        $row['status_text'] = 'Tersedia';
-        $row['status_class'] = 'tersedia';
-    }
-    
-    // Ambil booking hari ini untuk lapangan ini
-    $todayBookingsQuery = "
-        SELECT b.jam, b.lama_sewa, b.status, u.full_name, u.username 
-        FROM booking b
-        JOIN users u ON b.id_user = u.id
-        WHERE b.id_lapangan = {$row['id']} 
-        AND b.tanggal = '$today' 
-        AND b.status IN ('pending', 'aktif')
-        ORDER BY b.jam ASC
-    ";
-    $todayBookingsResult = mysqli_query($connection, $todayBookingsQuery);
-    $row['today_bookings'] = [];
-    while($booking = mysqli_fetch_assoc($todayBookingsResult)) {
-        $row['today_bookings'][] = $booking;
-    }
-    
     $lapangan[] = $row;
 }
 
-// Get statistics dengan status dinamis
+// Get statistics
 $totalLapangan = count($lapangan);
-$tersediaCount = count(array_filter($lapangan, function($lap) { return $lap['dynamic_status'] == 'tersedia'; }));
-$diBookingCount = count(array_filter($lapangan, function($lap) { return $lap['dynamic_status'] == 'dibooking'; }));
-$maintenanceCount = count(array_filter($lapangan, function($lap) { return $lap['dynamic_status'] == 'habis'; }));
+$tersediaCount = count(array_filter($lapangan, function($lap) { return $lap['status'] == 'tersedia'; }));
+$tutupCount = count(array_filter($lapangan, function($lap) { return $lap['status'] == 'habis'; }));
 ?>
 
 <!DOCTYPE html>
@@ -259,11 +207,7 @@ $maintenanceCount = count(array_filter($lapangan, function($lap) { return $lap['
             background: linear-gradient(45deg, var(--success-color), #2ecc71);
         }
 
-        .stat-item.dibooking {
-            background: linear-gradient(45deg, var(--warning-color), #e67e22);
-        }
-
-        .stat-item.maintenance {
+        .stat-item.tutup {
             background: linear-gradient(45deg, var(--danger-color), #c0392b);
         }
 
@@ -401,66 +345,8 @@ $maintenanceCount = count(array_filter($lapangan, function($lap) { return $lap['
             background: linear-gradient(45deg, var(--success-color), #2ecc71);
         }
 
-        .dibooking {
-            background: linear-gradient(45deg, var(--warning-color), #e67e22);
-        }
-
-        .maintenance {
+        .habis {
             background: linear-gradient(45deg, var(--danger-color), #ec7063);
-        }
-
-        .booking-schedule {
-            background: #fff3cd;
-            padding: 10px;
-            border-radius: 8px;
-            margin: 5px 0;
-            border-left: 4px solid var(--warning-color);
-            font-size: 0.8rem;
-        }
-
-        .booking-schedule h6 {
-            color: var(--warning-color);
-            font-weight: 600;
-            margin-bottom: 8px;
-            font-size: 0.75rem;
-        }
-
-        .schedule-item {
-            background: white;
-            padding: 5px 8px;
-            border-radius: 4px;
-            margin: 3px 0;
-            font-size: 0.7rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .schedule-user {
-            font-weight: 500;
-            color: #666;
-        }
-
-        .schedule-time {
-            font-weight: 600;
-            color: var(--primary-color);
-        }
-
-        .schedule-status {
-            padding: 2px 6px;
-            border-radius: 8px;
-            font-size: 0.6rem;
-            font-weight: 500;
-        }
-
-        .schedule-pending {
-            background: #fff3cd;
-            color: #856404;
-        }
-
-        .schedule-aktif {
-            background: #d1ecf1;
-            color: #0c5460;
         }
 
         .alert {
@@ -539,18 +425,6 @@ $maintenanceCount = count(array_filter($lapangan, function($lap) { return $lap['
             opacity: 0.5;
         }
 
-        .status-info {
-            display: flex;
-            flex-direction: column;
-            gap: 5px;
-        }
-
-        .refresh-indicator {
-            color: var(--info-color);
-            font-size: 0.8rem;
-            font-style: italic;
-        }
-
         @media (max-width: 768px) {
             .container {
                 padding: 15px;
@@ -577,10 +451,6 @@ $maintenanceCount = count(array_filter($lapangan, function($lap) { return $lap['
             .stats-grid {
                 grid-template-columns: repeat(2, 1fr);
             }
-
-            .booking-schedule {
-                font-size: 0.7rem;
-            }
         }
 
         @keyframes fadeIn {
@@ -590,22 +460,6 @@ $maintenanceCount = count(array_filter($lapangan, function($lap) { return $lap['
         
         .fade-in {
             animation: fadeIn 0.6s ease forwards;
-        }
-
-        @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
-        }
-
-        .live-indicator {
-            display: inline-block;
-            width: 8px;
-            height: 8px;
-            background: #27ae60;
-            border-radius: 50%;
-            margin-right: 5px;
-            animation: pulse 2s infinite;
         }
     </style>
 </head>
@@ -620,12 +474,7 @@ $maintenanceCount = count(array_filter($lapangan, function($lap) { return $lap['
             <div class="header-actions">
                 <div>
                     <h1><i class="bi bi-building me-2"></i>Kelola Lapangan Futsal</h1>
-                    <p class="mb-0">
-                        Manajemen data lapangan futsal
-                        <br><small class="refresh-indicator">
-                            <span class="live-indicator"></span>Status real-time • Auto refresh setiap 60 detik
-                        </small>
-                    </p>
+                    <p class="mb-0">Manajemen data lapangan futsal</p>
                 </div>
                 <div>
                     <a href="tambah_lapangan.php" class="btn btn-success btn-lg">
@@ -645,7 +494,7 @@ $maintenanceCount = count(array_filter($lapangan, function($lap) { return $lap['
 
         <!-- Statistics -->
         <div class="stats-section fade-in">
-            <h4 class="mb-4"><i class="bi bi-bar-chart me-2"></i>Statistik Lapangan Real-time</h4>
+            <h4 class="mb-4"><i class="bi bi-bar-chart me-2"></i>Statistik Lapangan</h4>
             <div class="stats-grid">
                 <div class="stat-item total">
                     <div class="stat-number"><?php echo $totalLapangan; ?></div>
@@ -655,13 +504,9 @@ $maintenanceCount = count(array_filter($lapangan, function($lap) { return $lap['
                     <div class="stat-number"><?php echo $tersediaCount; ?></div>
                     <div class="stat-label">Tersedia</div>
                 </div>
-                <div class="stat-item dibooking">
-                    <div class="stat-number"><?php echo $diBookingCount; ?></div>
-                    <div class="stat-label">Sedang Dibooking</div>
-                </div>
-                <div class="stat-item maintenance">
-                    <div class="stat-number"><?php echo $maintenanceCount; ?></div>
-                    <div class="stat-label">Maintenance/Tutup</div>
+                <div class="stat-item tutup">
+                    <div class="stat-number"><?php echo $tutupCount; ?></div>
+                    <div class="stat-label">Tutup/Maintenance</div>
                 </div>
             </div>
         </div>
@@ -703,12 +548,12 @@ $maintenanceCount = count(array_filter($lapangan, function($lap) { return $lap['
                     </div>
                     
                     <div class="col-md-6 mb-3">
-                        <label class="form-label">Status Lapangan (Manual Override)</label>
+                        <label class="form-label">Status Lapangan</label>
                         <select class="form-select" name="status" required>
-                            <option value="tersedia" <?php echo ($edit_data['status'] == 'tersedia') ? 'selected' : ''; ?>>Tersedia (Normal)</option>
+                            <option value="tersedia" <?php echo ($edit_data['status'] == 'tersedia') ? 'selected' : ''; ?>>Tersedia</option>
                             <option value="habis" <?php echo ($edit_data['status'] == 'habis') ? 'selected' : ''; ?>>Tutup/Maintenance</option>
                         </select>
-                        <small class="text-muted">Catatan: Status akan otomatis berubah jika ada booking aktif</small>
+                        <small class="text-muted">Atur ketersediaan lapangan untuk booking</small>
                     </div>
                 </div>
                 
@@ -745,9 +590,6 @@ $maintenanceCount = count(array_filter($lapangan, function($lap) { return $lap['
                 <h3><i class="bi bi-list me-2"></i>Daftar Lapangan</h3>
                 <div>
                     <span class="badge bg-primary">Total: <?php echo $totalLapangan; ?> lapangan</span>
-                    <button onclick="location.reload()" class="btn btn-outline-primary btn-sm ms-2">
-                        <i class="bi bi-arrow-clockwise me-1"></i>Refresh
-                    </button>
                 </div>
             </div>
             
@@ -770,8 +612,7 @@ $maintenanceCount = count(array_filter($lapangan, function($lap) { return $lap['
                             <th>Nama</th>
                             <th>Tipe</th>
                             <th>Harga</th>
-                            <th>Status Real-time</th>
-                            <th>Booking Hari Ini</th>
+                            <th>Status</th>
                             <th>Dibuat</th>
                             <th>Aksi</th>
                         </tr>
@@ -794,40 +635,10 @@ $maintenanceCount = count(array_filter($lapangan, function($lap) { return $lap['
                             <td><?php echo htmlspecialchars($lap['tipe']); ?></td>
                             <td><strong>Rp <?php echo number_format($lap['harga'], 0, ',', '.'); ?></strong></td>
                             <td>
-                                <div class="status-info">
-                                    <span class="status <?php echo $lap['status_class']; ?>">
-                                        <i class="bi bi-<?php echo $lap['dynamic_status'] == 'tersedia' ? 'check-circle' : ($lap['dynamic_status'] == 'dibooking' ? 'clock' : 'x-circle'); ?> me-1"></i>
-                                        <?php echo $lap['status_text']; ?>
-                                    </span>
-                                    <?php if ($lap['status'] == 'habis'): ?>
-                                        <small class="text-muted">(Manual Override)</small>
-                                    <?php endif; ?>
-                                </div>
-                            </td>
-                            <td>
-                                <?php if (!empty($lap['today_bookings'])): ?>
-                                    <div class="booking-schedule">
-                                        <h6><i class="bi bi-calendar-check me-1"></i><?php echo count($lap['today_bookings']); ?> Booking</h6>
-                                        <?php foreach ($lap['today_bookings'] as $booking): ?>
-                                        <div class="schedule-item">
-                                            <div>
-                                                <div class="schedule-time">
-                                                    <?php 
-                                                    echo date('H:i', strtotime($booking['jam'])) . ' - ' . 
-                                                         date('H:i', strtotime($booking['jam'] . ' + ' . $booking['lama_sewa'] . ' hours')); 
-                                                    ?>
-                                                </div>
-                                                <div class="schedule-user"><?php echo htmlspecialchars($booking['full_name']); ?></div>
-                                            </div>
-                                            <span class="schedule-status schedule-<?php echo $booking['status']; ?>">
-                                                <?php echo ucfirst($booking['status']); ?>
-                                            </span>
-                                        </div>
-                                        <?php endforeach; ?>
-                                    </div>
-                                <?php else: ?>
-                                    <small class="text-muted">Tidak ada booking</small>
-                                <?php endif; ?>
+                                <span class="status <?php echo $lap['status']; ?>">
+                                    <i class="bi bi-<?php echo $lap['status'] == 'tersedia' ? 'check-circle' : 'x-circle'; ?> me-1"></i>
+                                    <?php echo $lap['status'] == 'tersedia' ? 'Tersedia' : 'Tutup/Maintenance'; ?>
+                                </span>
                             </td>
                             <td><?php echo date('d/m/Y H:i', strtotime($lap['created_at'])); ?></td>
                             <td>
@@ -878,31 +689,6 @@ $maintenanceCount = count(array_filter($lapangan, function($lap) { return $lap['
                 }, 300);
             });
         }, 5000);
-
-        // Auto refresh halaman setiap 60 detik untuk update status real-time
-        setInterval(() => {
-            // Only refresh if we're not editing
-            if (!window.location.search.includes('edit=')) {
-                location.reload();
-            }
-        }, 60000);
-
-        // Show loading indicator during refresh
-        window.addEventListener('beforeunload', function() {
-            if (performance.navigation.type === 1) { // reload
-                document.body.style.opacity = '0.7';
-            }
-        });
-
-        // Add real-time timestamp
-        document.addEventListener('DOMContentLoaded', function() {
-            const now = new Date();
-            const timeString = now.toLocaleTimeString('id-ID');
-            const refreshIndicator = document.querySelector('.refresh-indicator');
-            if (refreshIndicator) {
-                refreshIndicator.innerHTML += ` • Diperbarui: ${timeString}`;
-            }
-        });
     </script>
 </body>
 </html>

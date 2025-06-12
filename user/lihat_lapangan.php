@@ -9,56 +9,13 @@ include('../config/database.php');
 
 $message = '';
 
-// Ambil data lapangan dengan status booking dinamis
+// Ambil data lapangan
 $lapanganQuery = "SELECT * FROM lapangan ORDER BY nama ASC";
 $lapanganResult = mysqli_query($connection, $lapanganQuery);
 $lapangan_list = [];
 
 if ($lapanganResult && mysqli_num_rows($lapanganResult) > 0) {
     while($row = mysqli_fetch_assoc($lapanganResult)) {
-        // Cek apakah ada booking aktif untuk lapangan ini hari ini
-        $today = date('Y-m-d');
-        $current_time = date('H:i:s');
-        
-        $checkBookingQuery = "
-            SELECT COUNT(*) as active_bookings 
-            FROM booking 
-            WHERE id_lapangan = {$row['id']} 
-            AND tanggal = '$today' 
-            AND status IN ('pending', 'aktif')
-            AND (
-                (jam <= '$current_time' AND ADDTIME(jam, SEC_TO_TIME(lama_sewa * 3600)) > '$current_time')
-                OR jam > '$current_time'
-            )
-        ";
-        
-        $checkResult = mysqli_query($connection, $checkBookingQuery);
-        $bookingData = mysqli_fetch_assoc($checkResult);
-        
-        // Set status dinamis berdasarkan booking
-        if ($bookingData['active_bookings'] > 0) {
-            $row['dynamic_status'] = 'habis';
-            $row['status_text'] = 'Sedang Dibooking';
-        } else {
-            $row['dynamic_status'] = 'tersedia';
-            $row['status_text'] = 'Tersedia';
-        }
-        
-        // Ambil booking hari ini untuk lapangan ini
-        $todayBookingsQuery = "
-            SELECT jam, lama_sewa, status 
-            FROM booking 
-            WHERE id_lapangan = {$row['id']} 
-            AND tanggal = '$today' 
-            AND status IN ('pending', 'aktif')
-            ORDER BY jam ASC
-        ";
-        $todayBookingsResult = mysqli_query($connection, $todayBookingsQuery);
-        $row['today_bookings'] = [];
-        while($booking = mysqli_fetch_assoc($todayBookingsResult)) {
-            $row['today_bookings'][] = $booking;
-        }
-        
         $lapangan_list[] = $row;
     }
 }
@@ -298,49 +255,6 @@ if ($lapanganResult && mysqli_num_rows($lapanganResult) > 0) {
             font-weight: 500;
         }
 
-        .booking-schedule {
-            background: #fff3cd;
-            padding: 15px;
-            border-radius: 8px;
-            margin: 15px 0;
-            border-left: 4px solid var(--warning-color);
-        }
-
-        .booking-schedule h6 {
-            color: var(--warning-color);
-            font-weight: 600;
-            margin-bottom: 10px;
-            font-size: 0.9rem;
-        }
-
-        .schedule-item {
-            background: white;
-            padding: 8px 12px;
-            border-radius: 5px;
-            margin: 5px 0;
-            font-size: 0.85rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .schedule-status {
-            padding: 2px 8px;
-            border-radius: 10px;
-            font-size: 0.7rem;
-            font-weight: 500;
-        }
-
-        .schedule-pending {
-            background: #fff3cd;
-            color: #856404;
-        }
-
-        .schedule-aktif {
-            background: #d1ecf1;
-            color: #0c5460;
-        }
-
         .empty-state {
             text-align: center;
             padding: 60px 20px;
@@ -431,7 +345,6 @@ if ($lapanganResult && mysqli_num_rows($lapanganResult) > 0) {
         <div class="page-header fade-in">
             <h1><i class="bi bi-geo-alt me-2"></i>Daftar Lapangan Futsal</h1>
             <p class="mb-0">Pilih lapangan yang sesuai dengan kebutuhan Anda</p>
-            <small class="text-muted">Status diperbarui secara real-time berdasarkan booking aktif</small>
         </div>
 
         <!-- Messages -->
@@ -465,9 +378,9 @@ if ($lapanganResult && mysqli_num_rows($lapanganResult) > 0) {
                 
                 <div class="card-content">
                     <!-- Status Badge -->
-                    <span class="status-badge status-<?php echo $lap['dynamic_status']; ?>">
-                        <i class="bi bi-<?php echo ($lap['dynamic_status'] == 'tersedia') ? 'check-circle' : 'clock'; ?> me-1"></i>
-                        <?php echo $lap['status_text']; ?>
+                    <span class="status-badge status-<?php echo $lap['status']; ?>">
+                        <i class="bi bi-<?php echo ($lap['status'] == 'tersedia') ? 'check-circle' : 'x-circle'; ?> me-1"></i>
+                        <?php echo ($lap['status'] == 'tersedia') ? 'Tersedia' : 'Tutup/Maintenance'; ?>
                     </span>
 
                     <!-- Nama Lapangan -->
@@ -480,26 +393,6 @@ if ($lapanganResult && mysqli_num_rows($lapanganResult) > 0) {
                         <p><i class="bi bi-people"></i><strong>Kapasitas:</strong> 10-22 Pemain</p>
                         <p><i class="bi bi-car-front"></i><strong>Parkir:</strong> Tersedia</p>
                     </div>
-
-                    <!-- Jadwal Booking Hari Ini -->
-                    <?php if (!empty($lap['today_bookings'])): ?>
-                    <div class="booking-schedule">
-                        <h6><i class="bi bi-calendar-check me-1"></i>Booking Hari Ini</h6>
-                        <?php foreach ($lap['today_bookings'] as $booking): ?>
-                        <div class="schedule-item">
-                            <span>
-                                <?php 
-                                echo date('H:i', strtotime($booking['jam'])) . ' - ' . 
-                                     date('H:i', strtotime($booking['jam'] . ' + ' . $booking['lama_sewa'] . ' hours')); 
-                                ?>
-                            </span>
-                            <span class="schedule-status schedule-<?php echo $booking['status']; ?>">
-                                <?php echo ucfirst($booking['status']); ?>
-                            </span>
-                        </div>
-                        <?php endforeach; ?>
-                    </div>
-                    <?php endif; ?>
 
                     <!-- Fasilitas -->
                     <div class="facilities">
@@ -520,13 +413,13 @@ if ($lapanganResult && mysqli_num_rows($lapanganResult) > 0) {
                     
                     <!-- Action Buttons -->
                     <div class="card-actions">
-                        <?php if ($lap['dynamic_status'] == 'tersedia'): ?>
+                        <?php if ($lap['status'] == 'tersedia'): ?>
                         <a href="booking.php?lapangan=<?php echo $lap['id']; ?>" class="btn btn-primary">
                             <i class="bi bi-calendar-plus me-1"></i>Booking Sekarang
                         </a>
                         <?php else: ?>
                         <button class="btn btn-primary" disabled>
-                            <i class="bi bi-clock me-1"></i>Sedang Dibooking
+                            <i class="bi bi-x-circle me-1"></i>Tutup/Maintenance
                         </button>
                         <?php endif; ?>
                         <button type="button" class="btn btn-outline-primary" onclick="showDetail(<?php echo $lap['id']; ?>)">
@@ -549,16 +442,8 @@ if ($lapanganResult && mysqli_num_rows($lapanganResult) > 0) {
             const lapangan = lapanganData.find(l => l.id == lapanganId);
             
             if (lapangan) {
-                let scheduleHtml = '';
-                if (lapangan.today_bookings && lapangan.today_bookings.length > 0) {
-                    scheduleHtml = '<hr><p><strong><i class="bi bi-calendar-check me-2"></i>Jadwal Hari Ini:</strong></p><ul style="margin-left: 20px;">';
-                    lapangan.today_bookings.forEach(booking => {
-                        const startTime = booking.jam;
-                        const endTime = new Date(new Date('1970-01-01T' + booking.jam + 'Z').getTime() + booking.lama_sewa * 60 * 60 * 1000).toISOString().substr(11, 5);
-                        scheduleHtml += `<li>${startTime} - ${endTime} (${booking.status})</li>`;
-                    });
-                    scheduleHtml += '</ul>';
-                }
+                const statusText = lapangan.status === 'tersedia' ? 'Tersedia' : 'Tutup/Maintenance';
+                const statusClass = lapangan.status === 'tersedia' ? 'bg-success' : 'bg-danger';
 
                 Swal.fire({
                     title: lapangan.nama,
@@ -566,10 +451,9 @@ if ($lapanganResult && mysqli_num_rows($lapanganResult) > 0) {
                         <div style="text-align: left;">
                             <p><strong><i class="bi bi-tag me-2"></i>Tipe:</strong> ${lapangan.tipe}</p>
                             <p><strong><i class="bi bi-cash me-2"></i>Harga:</strong> Rp ${parseInt(lapangan.harga).toLocaleString('id-ID')} / jam</p>
-                            <p><strong><i class="bi bi-check-circle me-2"></i>Status:</strong> <span class="badge ${lapangan.dynamic_status == 'tersedia' ? 'bg-success' : 'bg-danger'}">${lapangan.status_text}</span></p>
+                            <p><strong><i class="bi bi-check-circle me-2"></i>Status:</strong> <span class="badge ${statusClass}">${statusText}</span></p>
                             <p><strong><i class="bi bi-clock me-2"></i>Jam Operasional:</strong> 06:00 - 23:00 WIB</p>
                             <p><strong><i class="bi bi-people me-2"></i>Kapasitas:</strong> 10-22 Pemain</p>
-                            ${scheduleHtml}
                             <hr>
                             <p><strong><i class="bi bi-star me-2"></i>Fasilitas:</strong></p>
                             <ul style="margin-left: 20px;">
@@ -587,22 +471,17 @@ if ($lapanganResult && mysqli_num_rows($lapanganResult) > 0) {
                     imageHeight: 200,
                     imageAlt: lapangan.nama,
                     showCancelButton: true,
-                    confirmButtonText: lapangan.dynamic_status == 'tersedia' ? '<i class="bi bi-calendar-plus me-1"></i> Booking Sekarang' : '<i class="bi bi-clock me-1"></i> Sedang Dibooking',
+                    confirmButtonText: lapangan.status == 'tersedia' ? '<i class="bi bi-calendar-plus me-1"></i> Booking Sekarang' : '<i class="bi bi-x-circle me-1"></i> Tutup/Maintenance',
                     cancelButtonText: 'Tutup',
-                    confirmButtonColor: lapangan.dynamic_status == 'tersedia' ? '#3498db' : '#95a5a6',
+                    confirmButtonColor: lapangan.status == 'tersedia' ? '#3498db' : '#95a5a6',
                     cancelButtonColor: '#95a5a6'
                 }).then((result) => {
-                    if (result.isConfirmed && lapangan.dynamic_status == 'tersedia') {
+                    if (result.isConfirmed && lapangan.status == 'tersedia') {
                         window.location.href = `booking.php?lapangan=${lapanganId}`;
                     }
                 });
             }
         }
-
-        // Auto refresh halaman setiap 60 detik untuk update status
-        setInterval(() => {
-            location.reload();
-        }, 60000);
 
         // Animation on scroll
         const observerOptions = {

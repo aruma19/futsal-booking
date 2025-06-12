@@ -72,37 +72,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif (strtotime($tanggal) < strtotime(date('Y-m-d'))) {
         $error = 'Tanggal booking tidak boleh di masa lalu!';
     } else {
-        // Validasi jam operasional (06:00 - 23:00)
-        $jamStart = (int)date('H', strtotime($jam));
-        $jamEnd = $jamStart + $lama_sewa;
+        // ✅ VALIDASI STATUS LAPANGAN
+        $statusQuery = "SELECT status FROM lapangan WHERE id = $id_lapangan";
+        $statusResult = mysqli_query($connection, $statusQuery);
+        $lapanganData = mysqli_fetch_assoc($statusResult);
         
-        if ($jamStart < 6 || $jamEnd > 23) {
-            $error = 'Jam operasional lapangan adalah 06:00 - 23:00. Pastikan booking Anda tidak melebihi jam operasional!';
+        if (!$lapanganData) {
+            $error = 'Lapangan tidak ditemukan!';
+        } elseif ($lapanganData['status'] != 'tersedia') {
+            $error = 'Maaf, lapangan sedang tutup/maintenance dan tidak dapat dibooking!';
         } else {
-            // Cek slot waktu yang sudah dibooking
-            $bookedSlots = getBookedSlots($connection, $id_lapangan, $tanggal);
+            // Validasi jam operasional (06:00 - 23:00)
+            $jamStart = (int)date('H', strtotime($jam));
+            $jamEnd = $jamStart + $lama_sewa;
             
-            if (!isTimeSlotAvailable($bookedSlots, $jam, $lama_sewa)) {
-                $error = 'Maaf, waktu yang Anda pilih bertabrakan dengan booking lain. Silakan pilih waktu yang tersedia!';
+            if ($jamStart < 6 || $jamEnd > 23) {
+                $error = 'Jam operasional lapangan adalah 06:00 - 23:00. Pastikan booking Anda tidak melebihi jam operasional!';
             } else {
-                // Insert booking baru
-                $insertQuery = "INSERT INTO booking (id_user, id_lapangan, tanggal, jam, lama_sewa, kontak, status, created_at) 
-                               VALUES ($id_user, $id_lapangan, '$tanggal', '$jam', $lama_sewa, '$kontak', 'pending', NOW())";
+                // Cek slot waktu yang sudah dibooking
+                $bookedSlots = getBookedSlots($connection, $id_lapangan, $tanggal);
                 
-                if (mysqli_query($connection, $insertQuery)) {
-                    $message = 'Booking berhasil dibuat! Menunggu konfirmasi admin.';
-                    // Reset form
-                    $selected_lapangan = 0;
+                if (!isTimeSlotAvailable($bookedSlots, $jam, $lama_sewa)) {
+                    $error = 'Maaf, waktu yang Anda pilih bertabrakan dengan booking lain. Silakan pilih waktu yang tersedia!';
                 } else {
-                    $error = 'Terjadi kesalahan saat membuat booking: ' . mysqli_error($connection);
+                    // Insert booking baru
+                    $insertQuery = "INSERT INTO booking (id_user, id_lapangan, tanggal, jam, lama_sewa, kontak, status, created_at) 
+                                   VALUES ($id_user, $id_lapangan, '$tanggal', '$jam', $lama_sewa, '$kontak', 'pending', NOW())";
+                    
+                    if (mysqli_query($connection, $insertQuery)) {
+                        $message = 'Booking berhasil dibuat! Menunggu konfirmasi admin.';
+                        // Reset form
+                        $selected_lapangan = 0;
+                    } else {
+                        $error = 'Terjadi kesalahan saat membuat booking: ' . mysqli_error($connection);
+                    }
                 }
             }
         }
     }
 }
 
-// Ambil data lapangan
-$lapanganQuery = "SELECT * FROM lapangan ORDER BY nama";
+// ✅ AMBIL HANYA LAPANGAN YANG TERSEDIA
+$lapanganQuery = "SELECT * FROM lapangan WHERE status = 'tersedia' ORDER BY nama";
 $lapanganResult = mysqli_query($connection, $lapanganQuery);
 $lapangan_list = [];
 while($row = mysqli_fetch_assoc($lapanganResult)) {
@@ -112,10 +123,14 @@ while($row = mysqli_fetch_assoc($lapanganResult)) {
 // Ambil detail lapangan yang dipilih
 $selected_lapangan_data = null;
 if ($selected_lapangan > 0) {
-    $detailQuery = "SELECT * FROM lapangan WHERE id = $selected_lapangan";
+    $detailQuery = "SELECT * FROM lapangan WHERE id = $selected_lapangan AND status = 'tersedia'";
     $detailResult = mysqli_query($connection, $detailQuery);
     if (mysqli_num_rows($detailResult) > 0) {
         $selected_lapangan_data = mysqli_fetch_assoc($detailResult);
+    } else {
+        // ✅ REDIRECT JIKA LAPANGAN TIDAK TERSEDIA
+        $error = 'Lapangan yang dipilih tidak tersedia atau sedang tutup/maintenance!';
+        $selected_lapangan = 0;
     }
 }
 ?>
@@ -269,6 +284,12 @@ if ($selected_lapangan > 0) {
             border-left: 4px solid var(--danger-color);
         }
 
+        .alert-warning {
+            background: linear-gradient(45deg, rgba(243, 156, 18, 0.1), rgba(230, 126, 34, 0.1));
+            color: var(--warning-color);
+            border-left: 4px solid var(--warning-color);
+        }
+
         .lapangan-info {
             background: #f8f9fa;
             padding: 20px;
@@ -384,6 +405,31 @@ if ($selected_lapangan > 0) {
             font-size: 1.1em;
         }
 
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: var(--border-radius);
+            backdrop-filter: blur(10px);
+            box-shadow: var(--card-shadow);
+        }
+
+        .empty-state i {
+            font-size: 4rem;
+            color: #bdc3c7;
+            margin-bottom: 20px;
+        }
+
+        .empty-state h3 {
+            color: var(--text-color);
+            margin-bottom: 10px;
+        }
+
+        .empty-state p {
+            color: #7f8c8d;
+            font-size: 1.1rem;
+        }
+
         @media (max-width: 768px) {
             .container {
                 padding: 15px;
@@ -422,6 +468,7 @@ if ($selected_lapangan > 0) {
         <div class="page-header fade-in">
             <h1><i class="bi bi-calendar-plus me-2"></i>Booking Lapangan Futsal</h1>
             <p class="mb-0">Pilih lapangan dan waktu yang tersedia</p>
+            <small class="text-muted">Hanya menampilkan lapangan yang sedang tersedia</small>
         </div>
 
         <!-- Messages -->
@@ -437,12 +484,29 @@ if ($selected_lapangan > 0) {
         </div>
         <?php endif; ?>
 
+        <!-- ✅ CHECK IF NO AVAILABLE FIELDS -->
+        <?php if (empty($lapangan_list)): ?>
+        <div class="empty-state fade-in">
+            <i class="bi bi-geo-alt-fill"></i>
+            <h3>Tidak Ada Lapangan Tersedia</h3>
+            <p>Maaf, saat ini tidak ada lapangan yang tersedia untuk booking.</p>
+            <p>Silakan coba lagi nanti atau hubungi admin untuk informasi lebih lanjut.</p>
+            <a href="lihat_lapangan.php" class="btn btn-primary">
+                <i class="bi bi-arrow-left me-2"></i>Kembali ke Daftar Lapangan
+            </a>
+        </div>
+        <?php else: ?>
+
         <!-- Booking Form -->
         <div class="booking-form fade-in">
             <form method="POST" action="" id="bookingForm">
                 <!-- Pilih Lapangan -->
                 <div class="form-section">
-                    <h4><i class="bi bi-building me-2"></i>Pilih Lapangan</h4>
+                    <h4><i class="bi bi-building me-2"></i>Pilih Lapangan Tersedia</h4>
+                    <div class="alert alert-warning">
+                        <i class="bi bi-info-circle"></i>
+                        Hanya lapangan yang sedang tersedia yang dapat dibooking
+                    </div>
                     <div class="mb-3">
                         <label class="form-label">Lapangan Futsal</label>
                         <select class="form-select" name="id_lapangan" id="lapanganSelect" required onchange="updateLapanganInfo()">
@@ -453,7 +517,7 @@ if ($selected_lapangan > 0) {
                                     data-tipe="<?php echo htmlspecialchars($lap['tipe']); ?>"
                                     data-harga="<?php echo $lap['harga']; ?>"
                                     <?php echo ($selected_lapangan == $lap['id']) ? 'selected' : ''; ?>>
-                                <?php echo htmlspecialchars($lap['nama']); ?> - <?php echo htmlspecialchars($lap['tipe']); ?>
+                                <?php echo htmlspecialchars($lap['nama']); ?> - <?php echo htmlspecialchars($lap['tipe']); ?> (Tersedia)
                             </option>
                             <?php endforeach; ?>
                         </select>
@@ -576,6 +640,7 @@ if ($selected_lapangan > 0) {
                 </div>
             </form>
         </div>
+        <?php endif; ?>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
@@ -716,7 +781,7 @@ if ($selected_lapangan > 0) {
         }
 
         // Initialize if lapangan already selected
-        <?php if ($selected_lapangan > 0): ?>
+        <?php if ($selected_lapangan > 0 && $selected_lapangan_data): ?>
         updateLapanganInfo();
         <?php endif; ?>
 
