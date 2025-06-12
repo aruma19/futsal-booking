@@ -110,7 +110,7 @@ Edit file `config/database.php` sesuai dengan konfigurasi database Anda:
 $hostname = "localhost";     // Host database
 $username = "root";          // Username database
 $password = "";              // Password database (kosong untuk XAMPP default)
-$database = "futsal_booking"; // Nama database
+$database = "booking_futsal"; // Nama database
 
 $connection = new mysqli($hostname, $username, $password, $database);
 
