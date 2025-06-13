@@ -8,27 +8,113 @@ if (!isset($_SESSION['admin_id'])) {
 include('../config/database.php');
 
 $message = '';
+$error = '';
 
-// Handle status update
-if (isset($_POST['update_status']) && isset($_POST['booking_id']) && isset($_POST['new_status'])) {
+// Handle various admin actions
+if (isset($_POST['action']) && isset($_POST['booking_id'])) {
+    $action = sanitize_input($_POST['action']);
     $booking_id = (int)$_POST['booking_id'];
-    $new_status = sanitize_input($_POST['new_status']);
+    $reason = isset($_POST['reason']) ? sanitize_input($_POST['reason']) : '';
     
-    // Validasi status yang diizinkan
-    $allowed_status = ['pending', 'aktif', 'selesai', 'batal'];
-    if (in_array($new_status, $allowed_status)) {
-        $updateQuery = "UPDATE booking SET status = '$new_status' WHERE id = $booking_id";
-        if (mysqli_query($connection, $updateQuery)) {
-            $message = "Status booking berhasil diupdate ke: " . ucfirst($new_status);
-        } else {
-            $message = "Gagal mengupdate status booking!";
-        }
+    switch ($action) {
+        case 'confirm_payment':
+            // Konfirmasi pembayaran - ubah status booking menjadi aktif
+            $updateBooking = "UPDATE booking SET status = 'aktif' WHERE id = $booking_id AND status = 'pending'";
+            $updatePayment = "UPDATE payments SET status = 'completed' WHERE booking_id = $booking_id";
+            
+            if (mysqli_query($connection, $updateBooking) && mysqli_query($connection, $updatePayment)) {
+                $message = "Pembayaran berhasil dikonfirmasi dan booking diaktifkan.";
+            } else {
+                $error = "Gagal mengkonfirmasi pembayaran.";
+            }
+            break;
+            
+        case 'cancel_booking':
+            // Batalkan booking dengan kalkulasi refund
+            $bookingQuery = "SELECT b.*, l.harga FROM booking b JOIN lapangan l ON b.id_lapangan = l.id WHERE b.id = $booking_id";
+            $bookingResult = mysqli_query($connection, $bookingQuery);
+            $booking = mysqli_fetch_assoc($bookingResult);
+            
+            if ($booking) {
+                $total_harga = $booking['harga'] * $booking['lama_sewa'];
+                $refund_amount = 0;
+                $penalty_amount = 0;
+                
+                // Kalkulasi refund berdasarkan waktu
+                $booking_datetime = strtotime($booking['tanggal'] . ' ' . $booking['jam']);
+                $now = time();
+                $time_diff_hours = ($booking_datetime - $now) / 3600;
+                
+                if ($booking['status'] == 'pending') {
+                    // Tidak ada penalty untuk pending bookings
+                    $refund_amount = $booking['total_dibayar'];
+                    $penalty_amount = 0;
+                } elseif ($booking['status'] == 'aktif') {
+                    if ($time_diff_hours > 24) {
+                        // Tidak ada penalty jika lebih dari 24 jam
+                        $refund_amount = $booking['total_dibayar'];
+                        $penalty_amount = 0;
+                    } else {
+                        // Penalty berlaku
+                        if ($booking['status_pembayaran'] == 'dp') {
+                            // 0% penalty untuk DP (no refund)
+                            $penalty_amount = $booking['total_dibayar'];
+                            $refund_amount = 0;
+                        } else {
+                            // 50% penalty untuk full payment
+                            $penalty_amount = $booking['total_dibayar'] * 0.5;
+                            $refund_amount = $booking['total_dibayar'] - $penalty_amount;
+                        }
+                    }
+                }
+                
+                // Update booking status
+                $updateQuery = "UPDATE booking SET status = 'batal', total_pinalti = $penalty_amount WHERE id = $booking_id";
+                mysqli_query($connection, $updateQuery);
+                
+                // Insert refund record jika ada
+                if ($refund_amount > 0) {
+                    $refundQuery = "INSERT INTO refunds (booking_id, user_id, refund_amount, penalty_amount, reason, status, created_at) 
+                                   VALUES ($booking_id, {$booking['id_user']}, $refund_amount, $penalty_amount, '$reason', 'pending', NOW())";
+                    mysqli_query($connection, $refundQuery);
+                }
+                
+                $message = "Booking berhasil dibatalkan. Refund: Rp " . number_format($refund_amount, 0, ',', '.') . 
+                          " | Penalty: Rp " . number_format($penalty_amount, 0, ',', '.');
+            }
+            break;
+            
+        case 'complete_booking':
+            $updateQuery = "UPDATE booking SET status = 'selesai' WHERE id = $booking_id";
+            if (mysqli_query($connection, $updateQuery)) {
+                $message = "Booking berhasil diselesaikan.";
+            }
+            break;
+            
+        case 'reject_booking':
+            // Tolak booking dengan full refund
+            $updateQuery = "UPDATE booking SET status = 'batal' WHERE id = $booking_id";
+            if (mysqli_query($connection, $updateQuery)) {
+                // Full refund untuk rejected bookings
+                $bookingQuery = "SELECT * FROM booking WHERE id = $booking_id";
+                $bookingResult = mysqli_query($connection, $bookingQuery);
+                $booking = mysqli_fetch_assoc($bookingResult);
+                
+                if ($booking && $booking['total_dibayar'] > 0) {
+                    $refundQuery = "INSERT INTO refunds (booking_id, user_id, refund_amount, penalty_amount, reason, status, created_at) 
+                                   VALUES ($booking_id, {$booking['id_user']}, {$booking['total_dibayar']}, 0, '$reason', 'pending', NOW())";
+                    mysqli_query($connection, $refundQuery);
+                }
+                
+                $message = "Booking berhasil ditolak dan refund penuh akan diproses.";
+            }
+            break;
     }
 }
 
 // Pagination
 $page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
-$limit = 15;
+$limit = 10;
 $offset = ($page - 1) * $limit;
 
 // Filter
@@ -65,12 +151,16 @@ $countResult = mysqli_query($connection, $countQuery);
 $totalRecords = mysqli_fetch_assoc($countResult)['total'];
 $totalPages = ceil($totalRecords / $limit);
 
-// Get booking data with pagination
+// Get booking data with payment and refund info
 $bookingQuery = "
-    SELECT b.*, u.username, u.full_name, u.email, u.phone, l.nama as nama_lapangan, l.harga, l.tipe
+    SELECT b.*, u.username, u.full_name, u.email, u.phone, l.nama as nama_lapangan, l.harga, l.tipe,
+           p.payment_method, p.status as payment_status, p.created_at as payment_date,
+           r.refund_amount, r.penalty_amount, r.status as refund_status
     FROM booking b 
     JOIN users u ON b.id_user = u.id 
     JOIN lapangan l ON b.id_lapangan = l.id 
+    LEFT JOIN payments p ON b.id = p.booking_id
+    LEFT JOIN refunds r ON b.id = r.booking_id
     $whereClause
     ORDER BY b.created_at DESC
     LIMIT $limit OFFSET $offset
@@ -82,6 +172,19 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
     $all_booking[] = $row;
 }
 
+// Get statistics
+$statsQuery = "
+    SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+        SUM(CASE WHEN status = 'aktif' THEN 1 ELSE 0 END) as aktif,
+        SUM(CASE WHEN status = 'selesai' THEN 1 ELSE 0 END) as selesai,
+        SUM(CASE WHEN status = 'batal' THEN 1 ELSE 0 END) as batal,
+        SUM(CASE WHEN status IN ('aktif', 'selesai') THEN (SELECT l.harga * b.lama_sewa FROM lapangan l WHERE l.id = b.id_lapangan) ELSE 0 END) as total_revenue
+    FROM booking b
+";
+$statsResult = mysqli_query($connection, $statsQuery);
+$stats = mysqli_fetch_assoc($statsResult);
 ?>
 
 <!DOCTYPE html>
@@ -89,7 +192,7 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daftar Booking - Admin Futsal Booking</title>
+    <title>Kelola Booking - Admin Futsal</title>
 
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
@@ -101,23 +204,15 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
         :root {
             --primary-color: #e74c3c;
             --secondary-color: #c0392b;
-            --accent-color: #ec7063;
             --success-color: #27ae60;
             --warning-color: #f39c12;
-            --danger-color: #e74c3c;
             --info-color: #3498db;
-            --light-bg: #f8f9fa;
-            --text-color: #495057;
-            --card-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
-            --hover-transform: translateY(-5px);
-            --transition-speed: 0.3s;
-            --border-radius: 12px;
+            --danger-color: #e74c3c;
         }
         
         body {
             background: linear-gradient(135deg,rgb(255, 237, 237) 0%,rgb(240, 224, 254) 100%);
-            font-family: 'Poppins', 'Segoe UI', Roboto, sans-serif;
-            color: var(--text-color);
+            font-family: 'Poppins', sans-serif;
             min-height: 100vh;
         }
 
@@ -127,74 +222,186 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
             padding: 20px;
         }
 
-        .page-header {
+        .admin-header {
             background: rgba(255, 255, 255, 0.95);
             padding: 30px;
-            border-radius: var(--border-radius);
+            border-radius: 15px;
             text-align: center;
             margin-bottom: 30px;
-            backdrop-filter: blur(10px);
-            box-shadow: var(--card-shadow);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
         }
 
-        .page-header h1 {
-            color: #2c3e50;
-            font-weight: 700;
-            margin-bottom: 10px;
+        .stats-section {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 25px;
+            border-radius: 15px;
+            margin-bottom: 30px;
+            box-shadow: 0 8px 25px rgba(0,0,0,0.1);
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 20px;
+        }
+
+        .stat-item {
+            background: linear-gradient(45deg, var(--primary-color), var(--secondary-color));
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            transition: transform 0.3s ease;
+        }
+
+        .stat-item:hover { transform: translateY(-3px); }
+        .stat-item.pending { background: linear-gradient(45deg, var(--warning-color), #e67e22); }
+        .stat-item.aktif { background: linear-gradient(45deg, var(--success-color), #2ecc71); }
+        .stat-item.selesai { background: linear-gradient(45deg, #95a5a6, #7f8c8d); }
+        .stat-item.batal { background: linear-gradient(45deg, var(--danger-color), #c0392b); }
+        .stat-item.revenue { background: linear-gradient(45deg, var(--info-color), #5dade2); }
+
+        .stat-number {
+            font-size: 1.8rem;
+            font-weight: bold;
+        }
+
+        .stat-label {
+            font-size: 0.9rem;
+            opacity: 0.9;
         }
 
         .filter-section {
             background: rgba(255, 255, 255, 0.95);
             padding: 25px;
-            border-radius: var(--border-radius);
+            border-radius: 15px;
             margin-bottom: 30px;
-            backdrop-filter: blur(10px);
-            box-shadow: var(--card-shadow);
+            box-shadow: 0 8px 25px rgba(0,0,0,0.1);
         }
 
-        .table-section {
+        .booking-card {
             background: rgba(255, 255, 255, 0.95);
-            padding: 30px;
-            border-radius: var(--border-radius);
-            backdrop-filter: blur(10px);
-            box-shadow: var(--card-shadow);
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 8px 25px rgba(0,0,0,0.1);
+            border-left: 4px solid var(--primary-color);
+            transition: all 0.3s ease;
         }
 
-        .table-section h3 {
+        .booking-card:hover {
+            transform: translateX(5px);
+            box-shadow: 0 12px 35px rgba(0,0,0,0.15);
+        }
+
+        .booking-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #f1f2f6;
+        }
+
+        .booking-title {
+            font-size: 1.3em;
+            font-weight: 600;
+            color: #2c3e50;
+        }
+
+        .booking-id {
+            background: var(--primary-color);
+            color: white;
+            padding: 5px 12px;
+            border-radius: 15px;
+            font-size: 0.9em;
+            font-weight: 500;
+        }
+
+        .booking-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .info-section {
+            background: #f8f9fa;
+            padding: 18px;
+            border-radius: 12px;
+            border-left: 4px solid var(--info-color);
+        }
+
+        .info-section h6 {
             color: var(--primary-color);
             font-weight: 600;
-            margin-bottom: 25px;
-            padding-bottom: 10px;
-            border-bottom: 2px solid var(--primary-color);
+            margin-bottom: 12px;
+            font-size: 1em;
         }
 
-        .table {
-            border-radius: var(--border-radius);
-            overflow: hidden;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        .info-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid #e9ecef;
         }
 
-        .table th {
-            background: linear-gradient(45deg, var(--primary-color), var(--secondary-color));
-            color: white;
+        .info-item:last-child {
+            border-bottom: none;
+        }
+
+        .info-label {
             font-weight: 500;
-            border: none;
-            padding: 15px 12px;
-            font-size: 0.9rem;
+            color: #666;
+            font-size: 0.9em;
         }
 
-        .table td {
-            padding: 12px;
-            border-bottom: 1px solid #dee2e6;
-            vertical-align: middle;
-            font-size: 0.9rem;
+        .info-value {
+            color: #2c3e50;
+            font-weight: 600;
+            font-size: 0.9em;
         }
 
-        .table tbody tr:hover {
-            background-color: #f8f9fa;
+        .payment-info {
+            background: #e8f5e8;
+            padding: 18px;
+            border-radius: 12px;
+            margin-top: 15px;
+            border-left: 4px solid var(--success-color);
         }
 
-        .status {
+        .payment-warning {
+            background: #fff3cd;
+            padding: 18px;
+            border-radius: 12px;
+            margin-top: 15px;
+            border-left: 4px solid var(--warning-color);
+        }
+
+        .refund-info {
+            background: #f8d7da;
+            padding: 18px;
+            border-radius: 12px;
+            margin-top: 15px;
+            border-left: 4px solid var(--danger-color);
+        }
+
+        .status-badge {
+            padding: 8px 15px;
+            border-radius: 20px;
+            color: white;
+            font-size: 0.9em;
+            font-weight: 500;
+            display: inline-block;
+        }
+
+        .status-pending { background: linear-gradient(45deg, var(--warning-color), #e67e22); }
+        .status-aktif { background: linear-gradient(45deg, var(--success-color), #2ecc71); }
+        .status-selesai { background: linear-gradient(45deg, #95a5a6, #7f8c8d); }
+        .status-batal { background: linear-gradient(45deg, var(--danger-color), #c0392b); }
+
+        .payment-status {
             padding: 6px 12px;
             border-radius: 15px;
             color: white;
@@ -203,26 +410,29 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
             display: inline-block;
         }
 
-        .pending { background: linear-gradient(45deg, var(--warning-color), #e67e22); }
-        .aktif { background: linear-gradient(45deg, var(--success-color), #2ecc71); }
-        .batal { background: linear-gradient(45deg, var(--danger-color), #c0392b); }
-        .selesai { background: linear-gradient(45deg, #95a5a6, #7f8c8d); }
+        .payment-dp { background: var(--warning-color); }
+        .payment-lunas { background: var(--success-color); }
+        .payment-pending { background: #6c757d; }
+        .payment-completed { background: var(--success-color); }
+
+        .admin-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 15px;
+        }
 
         .btn {
-            padding: 8px 16px;
             border-radius: 20px;
             font-weight: 500;
+            padding: 8px 16px;
             transition: all 0.3s ease;
             border: none;
             font-size: 0.9rem;
         }
 
-        .btn-primary {
-            background: linear-gradient(45deg, var(--info-color), #5dade2);
-        }
-
-        .btn-secondary {
-            background: linear-gradient(45deg, #95a5a6, #7f8c8d);
+        .btn:hover {
+            transform: translateY(-2px);
         }
 
         .btn-success {
@@ -237,13 +447,60 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
             background: linear-gradient(45deg, var(--danger-color), #c0392b);
         }
 
-        .btn:hover {
-            transform: translateY(-2px);
+        .btn-info {
+            background: linear-gradient(45deg, var(--info-color), #5dade2);
         }
 
-        .btn-sm {
-            padding: 6px 12px;
-            font-size: 0.8rem;
+        .btn-primary {
+            background: linear-gradient(45deg, var(--info-color), #5dade2);
+        }
+
+        .btn-secondary {
+            background: linear-gradient(45deg, #6c757d, #5a6268);
+        }
+
+        .revenue-highlight {
+            font-weight: bold;
+            color: var(--success-color);
+            font-size: 1.1em;
+        }
+
+        .alert {
+            border-radius: 12px;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+            border: none;
+            display: flex;
+            align-items: center;
+        }
+
+        .alert i {
+            margin-right: 10px;
+            font-size: 1.1rem;
+        }
+
+        .alert-success {
+            background: linear-gradient(45deg, rgba(39, 174, 96, 0.15), rgba(46, 204, 113, 0.15));
+            color: var(--success-color);
+            border-left: 4px solid var(--success-color);
+        }
+
+        .alert-danger {
+            background: linear-gradient(45deg, rgba(231, 76, 60, 0.15), rgba(236, 112, 99, 0.15));
+            color: var(--danger-color);
+            border-left: 4px solid var(--danger-color);
+        }
+
+        .no-data {
+            text-align: center;
+            padding: 60px 20px;
+            color: #666;
+        }
+
+        .no-data i {
+            font-size: 4rem;
+            margin-bottom: 20px;
+            opacity: 0.5;
         }
 
         .pagination {
@@ -268,168 +525,32 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
             border-color: var(--primary-color);
         }
 
-        .no-data {
-            text-align: center;
-            padding: 60px 20px;
-            color: #666;
-        }
-
-        .no-data i {
-            font-size: 4rem;
-            margin-bottom: 20px;
-            opacity: 0.5;
-        }
-
-        .export-section {
-            text-align: right;
-            margin-bottom: 20px;
-        }
-
-        .user-info {
-            font-size: 0.8rem;
-            color: #666;
-        }
-
-        .revenue-highlight {
-            font-weight: bold;
-            color: var(--success-color);
-        }
-
-        .status-update-form {
-            display: inline-block;
-            margin-left: 10px;
-        }
-
-        .status-select {
-            padding: 4px 8px;
-            border-radius: 8px;
-            border: 1px solid #ddd;
-            font-size: 0.8rem;
-            margin-right: 5px;
-        }
-
-        .alert {
-            border-radius: var(--border-radius);
-            padding: 15px 20px;
-            font-size: 0.95rem;
-            margin-bottom: 20px;
-            border: none;
-            display: flex;
-            align-items: center;
-        }
-
-        .alert i {
-            margin-right: 10px;
-            font-size: 1.1rem;
-        }
-
-        .alert-success {
-            background: linear-gradient(45deg, rgba(39, 174, 96, 0.1), rgba(46, 204, 113, 0.1));
-            color: var(--success-color);
-            border-left: 4px solid var(--success-color);
-        }
-
-        .alert-danger {
-            background: linear-gradient(45deg, rgba(231, 76, 60, 0.1), rgba(236, 112, 99, 0.1));
-            color: var(--danger-color);
-            border-left: 4px solid var(--danger-color);
-        }
-
-        /* Print Styles */
-        @media print {
-            body * {
-                visibility: hidden;
-            }
-            
-            #printable-content,
-            #printable-content * {
-                visibility: visible;
-            }
-            
-            #printable-content {
-                position: absolute;
-                left: 0;
-                top: 0;
-                width: 100%;
-                background: white;
-                padding: 20px;
-            }
-            
-            .print-header {
-                text-align: center;
-                margin-bottom: 30px;
-                border-bottom: 2px solid #333;
-                padding-bottom: 15px;
-            }
-            
-            .print-header h2 {
-                color: #333;
-                margin: 0;
-                font-size: 24px;
-            }
-            
-            .print-info {
-                font-size: 14px;
-                color: #666;
-                margin-top: 10px;
-            }
-            
-            .table {
-                border-collapse: collapse;
-                width: 100%;
-                margin-top: 20px;
-            }
-            
-            .table th,
-            .table td {
-                border: 1px solid #333;
-                padding: 8px;
-                text-align: left;
-                font-size: 12px;
-            }
-            
-            .table th {
-                background-color: #f5f5f5;
-                font-weight: bold;
-            }
-            
-            .status {
-                background: none !important;
-                color: #333 !important;
-                border: 1px solid #333;
-                padding: 2px 6px;
-                border-radius: 3px;
-            }
-            
-            .user-info {
-                font-size: 10px;
-            }
-            
-            .revenue-highlight {
-                color: #333;
-            }
-            
-            .btn, .status-update-form {
-                display: none;
-            }
-        }
-
         @media (max-width: 768px) {
             .container {
                 padding: 15px;
             }
             
-            .table-responsive {
-                font-size: 0.8rem;
+            .booking-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 10px;
             }
             
-            .table th, .table td {
-                padding: 8px 6px;
+            .booking-info {
+                grid-template-columns: 1fr;
+            }
+            
+            .admin-actions {
+                justify-content: stretch;
+            }
+            
+            .admin-actions .btn {
+                flex: 1;
+                margin: 2px;
             }
 
-            .status-update-form {
-                display: block;
-                margin: 10px 0;
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
             }
         }
 
@@ -445,33 +566,67 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
 </head>
 
 <body>
-    <!-- Include Sidebar -->
     <?php include 'admin_sidebar.php'; ?>
-
+    
     <div class="container">
-        <!-- Page Header -->
-        <div class="page-header fade-in">
-            <h1><i class="bi bi-list-check me-2"></i>Daftar Semua Booking</h1>
-            <p class="mb-0">Monitor dan kelola semua booking lapangan futsal</p>
+        <!-- Header -->
+        <div class="admin-header fade-in">
+            <h1><i class="bi bi-gear-fill me-2"></i>Kelola Semua Booking</h1>
+            <p class="mb-0">Manajemen lengkap booking, pembayaran, dan refund</p>
         </div>
 
         <!-- Messages -->
         <?php if ($message): ?>
-        <div class="alert <?php echo (strpos($message, 'berhasil') !== false) ? 'alert-success' : 'alert-danger'; ?> fade-in">
-            <i class="bi bi-<?php echo (strpos($message, 'berhasil') !== false) ? 'check-circle' : 'exclamation-circle'; ?>"></i>
-            <?php echo $message; ?>
+        <div class="alert alert-success fade-in">
+            <i class="bi bi-check-circle"></i><?php echo $message; ?>
         </div>
         <?php endif; ?>
 
+        <?php if ($error): ?>
+        <div class="alert alert-danger fade-in">
+            <i class="bi bi-exclamation-circle"></i><?php echo $error; ?>
+        </div>
+        <?php endif; ?>
+
+        <!-- Statistics -->
+        <div class="stats-section fade-in">
+            <h4 class="mb-4"><i class="bi bi-bar-chart me-2"></i>Statistik Booking</h4>
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div class="stat-number"><?php echo $stats['total']; ?></div>
+                    <div class="stat-label">Total Booking</div>
+                </div>
+                <div class="stat-item pending">
+                    <div class="stat-number"><?php echo $stats['pending']; ?></div>
+                    <div class="stat-label">Pending</div>
+                </div>
+                <div class="stat-item aktif">
+                    <div class="stat-number"><?php echo $stats['aktif']; ?></div>
+                    <div class="stat-label">Aktif</div>
+                </div>
+                <div class="stat-item selesai">
+                    <div class="stat-number"><?php echo $stats['selesai']; ?></div>
+                    <div class="stat-label">Selesai</div>
+                </div>
+                <div class="stat-item batal">
+                    <div class="stat-number"><?php echo $stats['batal']; ?></div>
+                    <div class="stat-label">Dibatal</div>
+                </div>
+                <div class="stat-item revenue">
+                    <div class="stat-number">Rp <?php echo number_format($stats['total_revenue'], 0, ',', '.'); ?></div>
+                    <div class="stat-label">Total Revenue</div>
+                </div>
+            </div>
+        </div>
+
         <!-- Filter Section -->
         <div class="filter-section fade-in">
-            <h4 class="mb-3"><i class="bi bi-funnel me-2"></i>Filter & Pencarian</h4>
+            <h4 class="mb-3"><i class="bi bi-funnel me-2"></i>Filter Booking</h4>
             <form method="GET" action="">
                 <div class="row">
                     <div class="col-md-3 mb-3">
-                        <label class="form-label">Status</label>
                         <select class="form-select" name="status">
-                            <option value="all" <?php echo ($status_filter == 'all' || $status_filter == '') ? 'selected' : ''; ?>>Semua Status</option>
+                            <option value="all">Semua Status</option>
                             <option value="pending" <?php echo ($status_filter == 'pending') ? 'selected' : ''; ?>>Pending</option>
                             <option value="aktif" <?php echo ($status_filter == 'aktif') ? 'selected' : ''; ?>>Aktif</option>
                             <option value="selesai" <?php echo ($status_filter == 'selesai') ? 'selected' : ''; ?>>Selesai</option>
@@ -479,292 +634,299 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
                         </select>
                     </div>
                     <div class="col-md-3 mb-3">
-                        <label class="form-label">Tanggal</label>
                         <input type="date" class="form-control" name="date" value="<?php echo $date_filter; ?>">
                     </div>
                     <div class="col-md-4 mb-3">
-                        <label class="form-label">Cari</label>
-                        <input type="text" class="form-control" name="search" 
-                               placeholder="Nama user, lapangan..." value="<?php echo $search; ?>">
+                        <input type="text" class="form-control" name="search" placeholder="Cari nama/email..." value="<?php echo $search; ?>">
                     </div>
                     <div class="col-md-2 mb-3">
-                        <label class="form-label">&nbsp;</label>
-                        <div>
-                            <button type="submit" class="btn btn-primary w-100">
-                                <i class="bi bi-search me-1"></i>Filter
-                            </button>
-                        </div>
-                    </div>
-                </div>
-                <div class="row">
-                    <div class="col-12">
-                        <a href="daftar_booking.php" class="btn btn-secondary">
-                            <i class="bi bi-arrow-clockwise me-1"></i>Reset
-                        </a>
+                        <button type="submit" class="btn btn-primary w-100">
+                            <i class="bi bi-search me-1"></i>Filter
+                        </button>
                     </div>
                 </div>
             </form>
         </div>
 
-        <!-- Table Section -->
-        <div class="table-section fade-in">
-            <div class="d-flex justify-content-between align-items-center mb-4">
-                <h3>
-                    <i class="bi bi-table me-2"></i>Daftar Booking 
-                    <small class="text-muted">(<?php echo $totalRecords; ?> total)</small>
-                </h3>
-                <div class="export-section">
-                    <button onclick="printBookingList()" class="btn btn-secondary">
-                        <i class="bi bi-printer me-1"></i>Print
+        <!-- Booking List -->
+        <div class="fade-in">
+            <h4 class="mb-4">
+                <i class="bi bi-list me-2"></i>Daftar Booking 
+                <small class="text-muted">(<?php echo $totalRecords; ?> total)</small>
+            </h4>
+
+            <?php if (empty($all_booking)): ?>
+            <div class="no-data">
+                <i class="bi bi-inbox"></i>
+                <h5>Tidak ada booking ditemukan</h5>
+                <p>Belum ada booking dengan kriteria yang dipilih.</p>
+            </div>
+            <?php else: ?>
+            
+            <?php foreach ($all_booking as $booking): ?>
+            <?php
+            $total_harga = $booking['harga'] * $booking['lama_sewa'];
+            $sisa_pembayaran = $total_harga - $booking['total_dibayar'];
+            ?>
+            <div class="booking-card">
+                <div class="booking-header">
+                    <div>
+                        <div class="booking-title">
+                            <i class="bi bi-building me-2"></i><?php echo htmlspecialchars($booking['nama_lapangan']); ?>
+                        </div>
+                        <div class="mt-2">
+                            <span class="status-badge status-<?php echo $booking['status']; ?>">
+                                <?php echo ucfirst($booking['status']); ?>
+                            </span>
+                            <?php if ($booking['status_pembayaran']): ?>
+                            <span class="payment-status payment-<?php echo $booking['status_pembayaran']; ?> ms-2">
+                                <?php echo ($booking['status_pembayaran'] == 'dp') ? 'DP' : ucfirst($booking['status_pembayaran']); ?>
+                            </span>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                    <div class="text-end">
+                        <div class="booking-id">ID: #<?php echo $booking['id']; ?></div>
+                        <div class="revenue-highlight mt-2">Rp <?php echo number_format($total_harga, 0, ',', '.'); ?></div>
+                        <small class="text-muted"><?php echo date('d/m/Y H:i', strtotime($booking['created_at'])); ?></small>
+                    </div>
+                </div>
+
+                <div class="booking-info">
+                    <!-- Customer Info -->
+                    <div class="info-section">
+                        <h6><i class="bi bi-person me-2"></i>Customer</h6>
+                        <div class="info-item">
+                            <span class="info-label">Nama:</span>
+                            <span class="info-value"><?php echo htmlspecialchars($booking['full_name']); ?></span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Email:</span>
+                            <span class="info-value"><?php echo htmlspecialchars($booking['email']); ?></span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Telepon:</span>
+                            <span class="info-value"><?php echo htmlspecialchars($booking['phone']); ?></span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Kontak:</span>
+                            <span class="info-value"><?php echo htmlspecialchars($booking['kontak']); ?></span>
+                        </div>
+                    </div>
+
+                    <!-- Booking Details -->
+                    <div class="info-section">
+                        <h6><i class="bi bi-calendar me-2"></i>Detail Booking</h6>
+                        <div class="info-item">
+                            <span class="info-label">Tanggal:</span>
+                            <span class="info-value"><?php echo date('d/m/Y', strtotime($booking['tanggal'])); ?></span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Waktu:</span>
+                            <span class="info-value"><?php echo date('H:i', strtotime($booking['jam'])); ?> WIB</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Durasi:</span>
+                            <span class="info-value"><?php echo $booking['lama_sewa']; ?> jam</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Harga/jam:</span>
+                            <span class="info-value">Rp <?php echo number_format($booking['harga'], 0, ',', '.'); ?></span>
+                        </div>
+                    </div>
+
+                    <!-- Payment Info -->
+                    <div class="info-section">
+                        <h6><i class="bi bi-credit-card me-2"></i>Pembayaran</h6>
+                        <div class="info-item">
+                            <span class="info-label">Total Harga:</span>
+                            <span class="info-value">Rp <?php echo number_format($total_harga, 0, ',', '.'); ?></span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Sudah Dibayar:</span>
+                            <span class="info-value">Rp <?php echo number_format($booking['total_dibayar'], 0, ',', '.'); ?></span>
+                        </div>
+                        <?php if ($sisa_pembayaran > 0): ?>
+                        <div class="info-item">
+                            <span class="info-label">Sisa:</span>
+                            <span class="info-value text-warning">Rp <?php echo number_format($sisa_pembayaran, 0, ',', '.'); ?></span>
+                        </div>
+                        <?php endif; ?>
+                        <?php if ($booking['payment_method']): ?>
+                        <div class="info-item">
+                            <span class="info-label">Metode:</span>
+                            <span class="info-value"><?php echo ucfirst($booking['payment_method']); ?></span>
+                        </div>
+                        <?php endif; ?>
+                        <?php if ($booking['total_pinalti'] > 0): ?>
+                        <div class="info-item">
+                            <span class="info-label">Pinalti:</span>
+                            <span class="info-value text-danger">Rp <?php echo number_format($booking['total_pinalti'], 0, ',', '.'); ?></span>
+                        </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+
+                <!-- Payment Information -->
+                <?php if ($booking['payment_method']): ?>
+                <div class="payment-info">
+                    <h6><i class="bi bi-credit-card me-2"></i>Informasi Pembayaran</h6>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <strong>Metode:</strong> <?php echo ucfirst($booking['payment_method']); ?><br>
+                            <strong>Status:</strong> 
+                            <span class="payment-status payment-<?php echo $booking['payment_status'] ?? 'pending'; ?>">
+                                <?php echo ucfirst($booking['payment_status'] ?? 'pending'); ?>
+                            </span>
+                        </div>
+                        <div class="col-md-6">
+                            <strong>Tanggal Bayar:</strong> 
+                            <?php echo $booking['payment_date'] ? date('d/m/Y H:i', strtotime($booking['payment_date'])) : '-'; ?>
+                        </div>
+                    </div>
+                </div>
+                <?php endif; ?>
+
+                <!-- Refund Information -->
+                <?php if ($booking['refund_amount'] > 0 || $booking['penalty_amount'] > 0): ?>
+                <div class="refund-info">
+                    <h6><i class="bi bi-arrow-return-left me-2"></i>Informasi Refund</h6>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <strong>Jumlah Refund:</strong> Rp <?php echo number_format($booking['refund_amount'], 0, ',', '.'); ?><br>
+                            <strong>Pinalti:</strong> Rp <?php echo number_format($booking['penalty_amount'], 0, ',', '.'); ?>
+                        </div>
+                        <div class="col-md-6">
+                            <strong>Status Refund:</strong> 
+                            <span class="badge bg-<?php echo ($booking['refund_status'] == 'completed') ? 'success' : 'warning'; ?>">
+                                <?php echo ucfirst($booking['refund_status'] ?? 'pending'); ?>
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                <?php endif; ?>
+
+                <!-- Admin Actions -->
+                <div class="admin-actions">
+                    <?php if ($booking['status'] == 'pending'): ?>
+                    <button onclick="confirmAction('confirm_payment', <?php echo $booking['id']; ?>, 'Konfirmasi Pembayaran', 'Yakin ingin mengkonfirmasi pembayaran booking ini?')" class="btn btn-success btn-sm">
+                        <i class="bi bi-check-circle me-1"></i>Konfirmasi Bayar
+                    </button>
+                    <button onclick="confirmAction('reject_booking', <?php echo $booking['id']; ?>, 'Tolak Booking', 'Yakin ingin menolak booking ini?', true)" class="btn btn-danger btn-sm">
+                        <i class="bi bi-x-circle me-1"></i>Tolak
+                    </button>
+                    <?php endif; ?>
+
+                    <?php if ($booking['status'] == 'aktif'): ?>
+                    <button onclick="confirmAction('complete_booking', <?php echo $booking['id']; ?>, 'Selesaikan Booking', 'Yakin ingin menandai booking ini sebagai selesai?')" class="btn btn-primary btn-sm">
+                        <i class="bi bi-flag-fill me-1"></i>Selesaikan
+                    </button>
+                    <button onclick="confirmAction('cancel_booking', <?php echo $booking['id']; ?>, 'Batalkan Booking', 'Yakin ingin membatalkan booking ini?', true)" class="btn btn-warning btn-sm">
+                        <i class="bi bi-x-circle me-1"></i>Batalkan
+                    </button>
+                    <?php endif; ?>
+
+                    <a href="payment_receipt.php?booking_id=<?php echo $booking['id']; ?>" target="_blank" class="btn btn-info btn-sm">
+                        <i class="bi bi-receipt me-1"></i>Lihat Struk
+                    </a>
+
+                    <button onclick="viewDetail(<?php echo $booking['id']; ?>)" class="btn btn-secondary btn-sm">
+                        <i class="bi bi-eye me-1"></i>Detail
                     </button>
                 </div>
             </div>
-            
-            <div class="table-responsive">
-                <?php if (empty($all_booking)): ?>
-                <div class="no-data">
-                    <i class="bi bi-inbox"></i>
-                    <h5>Tidak ada data booking</h5>
-                    <p>Belum ada booking dengan kriteria yang dipilih.</p>
-                </div>
-                <?php else: ?>
-                <table class="table table-hover" id="booking-table">
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>User</th>
-                            <th>Lapangan</th>
-                            <th>Tanggal</th>
-                            <th>Waktu</th>
-                            <th>Durasi</th>
-                            <th>Kontak</th>
-                            <th>Total</th>
-                            <th>Status & Aksi</th>
-                            <th>Dibuat</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach ($all_booking as $booking): ?>
-                        <tr>
-                            <td><strong>#<?php echo $booking['id']; ?></strong></td>
-                            <td>
-                                <div><strong><?php echo htmlspecialchars($booking['full_name']); ?></strong></div>
-                                <div class="user-info">@<?php echo htmlspecialchars($booking['username']); ?></div>
-                                <div class="user-info"><?php echo htmlspecialchars($booking['email']); ?></div>
-                            </td>
-                            <td>
-                                <div><strong><?php echo htmlspecialchars($booking['nama_lapangan']); ?></strong></div>
-                                <div class="user-info"><?php echo htmlspecialchars($booking['tipe']); ?></div>
-                            </td>
-                            <td><?php echo date('d/m/Y', strtotime($booking['tanggal'])); ?></td>
-                            <td><?php echo date('H:i', strtotime($booking['jam'])); ?> WIB</td>
-                            <td><?php echo $booking['lama_sewa']; ?> jam</td>
-                            <td><?php echo htmlspecialchars($booking['kontak']); ?></td>
-                            <td>
-                                <span class="revenue-highlight">
-                                    Rp <?php echo number_format($booking['harga'] * $booking['lama_sewa'], 0, ',', '.'); ?>
-                                </span>
-                            </td>
-                            <td>
-                                <span class="status <?php echo $booking['status']; ?>">
-                                    <?php 
-                                    $status_icons = [
-                                        'pending' => 'clock',
-                                        'aktif' => 'check-circle',
-                                        'batal' => 'x-circle',
-                                        'selesai' => 'check2-circle'
-                                    ];
-                                    $icon = $status_icons[$booking['status']] ?? 'circle';
-                                    echo '<i class="bi bi-' . $icon . ' me-1"></i>' . ucfirst($booking['status']); 
-                                    ?>
-                                </span>
-                                
-                                <!-- Status Update Form -->
-                                <div class="status-update-form">
-                                    <form method="POST" style="display: inline-block;">
-                                        <input type="hidden" name="booking_id" value="<?php echo $booking['id']; ?>">
-                                        <select name="new_status" class="status-select" onchange="confirmStatusUpdate(this.form, this.value, '<?php echo $booking['status']; ?>')">
-                                            <option value="">Ubah Status</option>
-                                            <?php if ($booking['status'] == 'pending'): ?>
-                                                <option value="aktif">→ Aktif</option>
-                                                <option value="batal">→ Batal</option>
-                                            <?php elseif ($booking['status'] == 'aktif'): ?>
-                                                <option value="selesai">→ Selesai</option>
-                                                <option value="batal">→ Batal</option>
-                                            <?php endif; ?>
-                                        </select>
-                                    </form>
-                                </div>
-                            </td>
-                            <td>
-                                <div><?php echo date('d/m/Y', strtotime($booking['created_at'])); ?></div>
-                                <div class="user-info"><?php echo date('H:i', strtotime($booking['created_at'])); ?></div>
-                            </td>
-                        </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
+            <?php endforeach; ?>
 
-                <!-- Pagination -->
-                <?php if ($totalPages > 1): ?>
-                <nav aria-label="Page navigation">
-                    <ul class="pagination">
-                        <li class="page-item <?php echo ($page <= 1) ? 'disabled' : ''; ?>">
-                            <a class="page-link" href="?page=<?php echo $page-1; ?>&status=<?php echo $status_filter; ?>&date=<?php echo $date_filter; ?>&search=<?php echo $search; ?>">
-                                <i class="bi bi-chevron-left"></i>
-                            </a>
-                        </li>
-                        
-                        <?php 
-                        $start = max(1, $page - 2);
-                        $end = min($totalPages, $page + 2);
-                        for ($i = $start; $i <= $end; $i++): 
-                        ?>
-                        <li class="page-item <?php echo ($page == $i) ? 'active' : ''; ?>">
-                            <a class="page-link" href="?page=<?php echo $i; ?>&status=<?php echo $status_filter; ?>&date=<?php echo $date_filter; ?>&search=<?php echo $search; ?>"><?php echo $i; ?></a>
-                        </li>
-                        <?php endfor; ?>
-                        
-                        <li class="page-item <?php echo ($page >= $totalPages) ? 'disabled' : ''; ?>">
-                            <a class="page-link" href="?page=<?php echo $page+1; ?>&status=<?php echo $status_filter; ?>&date=<?php echo $date_filter; ?>&search=<?php echo $search; ?>">
-                                <i class="bi bi-chevron-right"></i>
-                            </a>
-                        </li>
-                    </ul>
-                </nav>
-                <?php endif; ?>
-                <?php endif; ?>
-            </div>
+            <!-- Pagination -->
+            <?php if ($totalPages > 1): ?>
+            <nav aria-label="Page navigation">
+                <ul class="pagination">
+                    <li class="page-item <?php echo ($page <= 1) ? 'disabled' : ''; ?>">
+                        <a class="page-link" href="?page=<?php echo $page-1; ?>&status=<?php echo $status_filter; ?>&date=<?php echo $date_filter; ?>&search=<?php echo $search; ?>">
+                            <i class="bi bi-chevron-left"></i>
+                        </a>
+                    </li>
+                    
+                    <?php 
+                    $start = max(1, $page - 2);
+                    $end = min($totalPages, $page + 2);
+                    for ($i = $start; $i <= $end; $i++): 
+                    ?>
+                    <li class="page-item <?php echo ($page == $i) ? 'active' : ''; ?>">
+                        <a class="page-link" href="?page=<?php echo $i; ?>&status=<?php echo $status_filter; ?>&date=<?php echo $date_filter; ?>&search=<?php echo $search; ?>"><?php echo $i; ?></a>
+                    </li>
+                    <?php endfor; ?>
+                    
+                    <li class="page-item <?php echo ($page >= $totalPages) ? 'disabled' : ''; ?>">
+                        <a class="page-link" href="?page=<?php echo $page+1; ?>&status=<?php echo $status_filter; ?>&date=<?php echo $date_filter; ?>&search=<?php echo $search; ?>">
+                            <i class="bi bi-chevron-right"></i>
+                        </a>
+                    </li>
+                </ul>
+            </nav>
+            <?php endif; ?>
+            <?php endif; ?>
         </div>
     </div>
 
-    <!-- Hidden Printable Content -->
-    <div id="printable-content" style="display: none;">
-        <div class="print-header">
-            <h2>Laporan Daftar Booking Futsal</h2>
-            <div class="print-info">
-                <p>Tanggal Cetak: <?php echo date('d/m/Y H:i:s'); ?></p>
-                <?php if ($status_filter && $status_filter != 'all'): ?>
-                <p>Filter Status: <?php echo ucfirst($status_filter); ?></p>
-                <?php endif; ?>
-                <?php if ($date_filter): ?>
-                <p>Filter Tanggal: <?php echo date('d/m/Y', strtotime($date_filter)); ?></p>
-                <?php endif; ?>
-                <?php if ($search): ?>
-                <p>Pencarian: "<?php echo htmlspecialchars($search); ?>"</p>
-                <?php endif; ?>
-                <p>Total Data: <?php echo $totalRecords; ?> booking</p>
+    <!-- Admin Action Modal -->
+    <div class="modal fade" id="actionModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="modalTitle">Konfirmasi Aksi</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" id="actionForm">
+                    <div class="modal-body">
+                        <input type="hidden" name="booking_id" id="modalBookingId">
+                        <input type="hidden" name="action" id="modalAction">
+                        <p id="modalMessage"></p>
+                        <div id="reasonSection" style="display: none;">
+                            <label class="form-label">Alasan (opsional):</label>
+                            <textarea class="form-control" name="reason" rows="3" placeholder="Masukkan alasan pembatalan atau penolakan..."></textarea>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Batal</button>
+                        <button type="submit" class="btn btn-primary" id="modalSubmit">Konfirmasi</button>
+                    </div>
+                </form>
             </div>
         </div>
-        
-        <?php if (!empty($all_booking)): ?>
-        <table class="table">
-            <thead>
-                <tr>
-                    <th>ID</th>
-                    <th>User</th>
-                    <th>Lapangan</th>
-                    <th>Tanggal</th>
-                    <th>Waktu</th>
-                    <th>Durasi</th>
-                    <th>Kontak</th>
-                    <th>Total</th>
-                    <th>Status</th>
-                    <th>Dibuat</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php foreach ($all_booking as $booking): ?>
-                <tr>
-                    <td>#<?php echo $booking['id']; ?></td>
-                    <td>
-                        <div><?php echo htmlspecialchars($booking['full_name']); ?></div>
-                        <div class="user-info">@<?php echo htmlspecialchars($booking['username']); ?></div>
-                        <div class="user-info"><?php echo htmlspecialchars($booking['email']); ?></div>
-                    </td>
-                    <td>
-                        <div><?php echo htmlspecialchars($booking['nama_lapangan']); ?></div>
-                        <div class="user-info"><?php echo htmlspecialchars($booking['tipe']); ?></div>
-                    </td>
-                    <td><?php echo date('d/m/Y', strtotime($booking['tanggal'])); ?></td>
-                    <td><?php echo date('H:i', strtotime($booking['jam'])); ?> WIB</td>
-                    <td><?php echo $booking['lama_sewa']; ?> jam</td>
-                    <td><?php echo htmlspecialchars($booking['kontak']); ?></td>
-                    <td>
-                        <span class="revenue-highlight">
-                            Rp <?php echo number_format($booking['harga'] * $booking['lama_sewa'], 0, ',', '.'); ?>
-                        </span>
-                    </td>
-                    <td>
-                        <span class="status <?php echo $booking['status']; ?>">
-                            <?php echo ucfirst($booking['status']); ?>
-                        </span>
-                    </td>
-                    <td>
-                        <div><?php echo date('d/m/Y', strtotime($booking['created_at'])); ?></div>
-                        <div class="user-info"><?php echo date('H:i', strtotime($booking['created_at'])); ?></div>
-                    </td>
-                </tr>
-                <?php endforeach; ?>
-            </tbody>
-        </table>
-        <?php else: ?>
-        <p style="text-align: center; margin-top: 40px;">Tidak ada data booking untuk dicetak.</p>
-        <?php endif; ?>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     
     <script>
-        // Konfirmasi perubahan status
-        function confirmStatusUpdate(form, newStatus, currentStatus) {
-            if (newStatus === '') return;
+        const actionModal = new bootstrap.Modal(document.getElementById('actionModal'));
+
+        function confirmAction(action, bookingId, title, message, showReason = false) {
+            document.getElementById('modalTitle').textContent = title;
+            document.getElementById('modalMessage').textContent = message;
+            document.getElementById('modalBookingId').value = bookingId;
+            document.getElementById('modalAction').value = action;
             
-            const statusNames = {
-                'pending': 'Pending',
-                'aktif': 'Aktif', 
-                'selesai': 'Selesai',
-                'batal': 'Dibatal'
-            };
+            const reasonSection = document.getElementById('reasonSection');
+            if (showReason) {
+                reasonSection.style.display = 'block';
+            } else {
+                reasonSection.style.display = 'none';
+            }
             
-            Swal.fire({
-                title: 'Konfirmasi Perubahan Status',
-                text: `Yakin ingin mengubah status dari "${statusNames[currentStatus]}" ke "${statusNames[newStatus]}"?`,
-                icon: 'warning',
-                showCancelButton: true,
-                confirmButtonColor: '#e74c3c',
-                cancelButtonColor: '#95a5a6',
-                confirmButtonText: 'Ya, Ubah!',
-                cancelButtonText: 'Batal'
-            }).then((result) => {
-                if (result.isConfirmed) {
-                    // Add hidden submit button and trigger it
-                    const submitBtn = document.createElement('input');
-                    submitBtn.type = 'hidden';
-                    submitBtn.name = 'update_status';
-                    submitBtn.value = '1';
-                    form.appendChild(submitBtn);
-                    form.submit();
-                } else {
-                    // Reset select value
-                    form.querySelector('select[name="new_status"]').value = '';
-                }
-            });
+            // Change submit button color based on action
+            const submitBtn = document.getElementById('modalSubmit');
+            if (action.includes('cancel') || action.includes('reject')) {
+                submitBtn.className = 'btn btn-danger';
+            } else {
+                submitBtn.className = 'btn btn-primary';
+            }
+            
+            actionModal.show();
         }
 
-        // Enhanced Print Function - Only prints booking list
-        function printBookingList() {
-            // Show the printable content
-            const printContent = document.getElementById('printable-content');
-            printContent.style.display = 'block';
-            
-            // Print the page
-            window.print();
-            
-            // Hide the printable content again after printing
-            setTimeout(() => {
-                printContent.style.display = 'none';
-            }, 1000);
+        function viewDetail(bookingId) {
+            window.open(`booking_detail.php?id=${bookingId}`, '_blank');
         }
 
         // Auto hide alerts after 5 seconds
@@ -778,24 +940,15 @@ while($row = mysqli_fetch_assoc($bookingResult)) {
             });
         }, 5000);
 
-        // Auto refresh data every 60 seconds
-        setInterval(function() {
-            // Only refresh if we're on the first page and no filters are applied
-            const urlParams = new URLSearchParams(window.location.search);
-            if (!urlParams.has('page') && !urlParams.has('status') && !urlParams.has('date') && !urlParams.has('search')) {
-                location.reload();
+        // Auto refresh every 60 seconds
+        setInterval(() => {
+            if (!document.querySelector('.modal.show')) {
+                const urlParams = new URLSearchParams(window.location.search);
+                if (!urlParams.has('page') && !urlParams.has('status') && !urlParams.has('date') && !urlParams.has('search')) {
+                    location.reload();
+                }
             }
         }, 60000);
-
-        // Enhance table with better responsive behavior
-        window.addEventListener('resize', function() {
-            const table = document.querySelector('.table-responsive');
-            if (window.innerWidth < 768) {
-                table.style.fontSize = '0.8rem';
-            } else {
-                table.style.fontSize = '0.9rem';
-            }
-        });
     </script>
 </body>
 </html>

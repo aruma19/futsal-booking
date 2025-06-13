@@ -18,16 +18,57 @@ if (isset($_GET['cancel']) && isset($_GET['id'])) {
     $booking_id = (int)$_GET['id'];
     
     // Cek apakah booking milik user dan bisa dibatalkan
-    $checkQuery = "SELECT * FROM booking WHERE id = $booking_id AND id_user = $user_id AND status = 'pending'";
+    $checkQuery = "SELECT * FROM booking WHERE id = $booking_id AND id_user = $user_id AND status IN ('pending', 'aktif')";
     $checkResult = mysqli_query($connection, $checkQuery);
     
     if (mysqli_num_rows($checkResult) > 0) {
-        $cancelQuery = "UPDATE booking SET status = 'batal' WHERE id = $booking_id";
-        if (mysqli_query($connection, $cancelQuery)) {
-            $message = "Booking berhasil dibatalkan!";
-        } else {
-            $error = "Gagal membatalkan booking!";
+        $booking_data = mysqli_fetch_assoc($checkResult);
+        
+        // Calculate refund and penalty
+        $total_harga = 0;
+        $penalty_amount = 0;
+        $refund_amount = 0;
+        
+        // Get lapangan price
+        $lapanganQuery = "SELECT harga FROM lapangan WHERE id = " . $booking_data['id_lapangan'];
+        $lapanganResult = mysqli_query($connection, $lapanganQuery);
+        $lapangan = mysqli_fetch_assoc($lapanganResult);
+        
+        if ($lapangan) {
+            $total_harga = $lapangan['harga'] * $booking_data['lama_sewa'];
+            
+            // Calculate penalty based on timing and payment status
+            $booking_datetime = strtotime($booking_data['tanggal'] . ' ' . $booking_data['jam']);
+            $now = time();
+            $time_diff_hours = ($booking_datetime - $now) / 3600;
+            
+            if ($booking_data['status'] == 'pending') {
+                // No penalty for pending bookings
+                $penalty_amount = 0;
+                $refund_amount = $booking_data['total_dibayar'];
+            } elseif ($booking_data['status'] == 'aktif') {
+                if ($time_diff_hours > 24) {
+                    // No penalty if cancelled more than 24 hours before
+                    $penalty_amount = 0;
+                    $refund_amount = $booking_data['total_dibayar'];
+                } else {
+                    // Penalty applies
+                    if ($booking_data['status_pembayaran'] == 'dp') {
+                        // 0% penalty for DP (no refund)
+                        $penalty_amount = $booking_data['total_dibayar'];
+                        $refund_amount = 0;
+                    } else {
+                        // 50% penalty for full payment
+                        $penalty_amount = $booking_data['total_dibayar'] * 0.5;
+                        $refund_amount = $booking_data['total_dibayar'] - $penalty_amount;
+                    }
+                }
+            }
         }
+        
+        // Redirect to cancellation page with details
+        header("Location: cancel_booking.php?id=$booking_id&penalty=$penalty_amount&refund=$refund_amount");
+        exit();
     } else {
         $error = "Booking tidak ditemukan atau tidak bisa dibatalkan!";
     }
@@ -61,11 +102,15 @@ $countResult = mysqli_query($connection, $countQuery);
 $totalRecords = mysqli_fetch_assoc($countResult)['total'];
 $totalPages = ceil($totalRecords / $limit);
 
-// Get booking history with pagination
+// Get booking history with payment information
 $historyQuery = "
-    SELECT b.*, l.nama as nama_lapangan, l.harga, l.tipe
+    SELECT b.*, l.nama as nama_lapangan, l.harga, l.tipe,
+           p.amount as payment_amount, p.payment_type, p.payment_method, p.status as payment_status,
+           r.refund_amount, r.penalty_amount
     FROM booking b 
     JOIN lapangan l ON b.id_lapangan = l.id 
+    LEFT JOIN payments p ON b.id = p.booking_id AND p.payment_type IN ('dp', 'lunas')
+    LEFT JOIN refunds r ON b.id = r.booking_id
     $whereClause
     ORDER BY b.created_at DESC
     LIMIT $limit OFFSET $offset
@@ -240,12 +285,19 @@ $stats = mysqli_fetch_assoc($statsResult);
             justify-content: space-between;
             align-items: center;
             margin-bottom: 15px;
+            flex-wrap: wrap;
         }
 
         .booking-title {
             font-weight: 600;
             color: #2c3e50;
             font-size: 1.2em;
+        }
+
+        .booking-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
         }
 
         .booking-info {
@@ -273,6 +325,22 @@ $stats = mysqli_fetch_assoc($statsResult);
             font-weight: 600;
         }
 
+        .payment-info {
+            background: #e8f5e8;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+            border-left: 4px solid var(--success-color);
+        }
+
+        .payment-warning {
+            background: #fff3cd;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+            border-left: 4px solid var(--warning-color);
+        }
+
         .status {
             padding: 8px 15px;
             border-radius: 20px;
@@ -287,12 +355,26 @@ $stats = mysqli_fetch_assoc($statsResult);
         .batal { background: linear-gradient(45deg, var(--danger-color), #c0392b); }
         .selesai { background: linear-gradient(45deg, #95a5a6, #7f8c8d); }
 
+        .payment-status {
+            padding: 6px 12px;
+            border-radius: 15px;
+            color: white;
+            font-size: 0.8em;
+            font-weight: 500;
+            display: inline-block;
+        }
+
+        .payment-dp { background: var(--warning-color); }
+        .payment-lunas { background: var(--success-color); }
+        .payment-refund { background: #9b59b6; }
+
         .btn {
             padding: 8px 16px;
             border-radius: 20px;
             font-weight: 500;
             transition: all 0.3s ease;
             border: none;
+            font-size: 0.9rem;
         }
 
         .btn-danger {
@@ -303,8 +385,25 @@ $stats = mysqli_fetch_assoc($statsResult);
             background: linear-gradient(45deg, var(--primary-color), var(--secondary-color));
         }
 
+        .btn-success {
+            background: linear-gradient(45deg, var(--success-color), #2ecc71);
+        }
+
+        .btn-warning {
+            background: linear-gradient(45deg, var(--warning-color), #e67e22);
+        }
+
+        .btn-info {
+            background: linear-gradient(45deg, #17a2b8, #138496);
+        }
+
         .btn:hover {
             transform: translateY(-2px);
+        }
+
+        .btn-sm {
+            padding: 6px 12px;
+            font-size: 0.8rem;
         }
 
         .alert {
@@ -379,10 +478,21 @@ $stats = mysqli_fetch_assoc($statsResult);
             .booking-header {
                 flex-direction: column;
                 align-items: flex-start;
+                gap: 10px;
             }
             
             .booking-info {
                 grid-template-columns: 1fr;
+            }
+
+            .booking-actions {
+                width: 100%;
+                justify-content: stretch;
+            }
+
+            .booking-actions .btn {
+                flex: 1;
+                margin: 2px;
             }
         }
 
@@ -398,7 +508,7 @@ $stats = mysqli_fetch_assoc($statsResult);
 </head>
 
 <body>
-        <!-- Include Sidebar -->
+    <!-- Include Sidebar -->
     <?php include 'user_sidebar.php'; ?>
     
     <div class="container">
@@ -497,13 +607,20 @@ $stats = mysqli_fetch_assoc($statsResult);
             </div>
             <?php else: ?>
             <?php foreach ($booking_history as $booking): ?>
+            <?php
+            $total_harga = $booking['harga'] * $booking['lama_sewa'];
+            $sisa_pembayaran = $total_harga - $booking['total_dibayar'];
+            $can_cancel = in_array($booking['status'], ['pending', 'aktif']);
+            $can_complete_payment = ($booking['status_pembayaran'] == 'dp' && $booking['status'] == 'aktif');
+            ?>
             <div class="booking-card">
                 <div class="booking-header">
                     <div class="booking-title">
                         <i class="bi bi-building me-2"></i><?php echo htmlspecialchars($booking['nama_lapangan']); ?>
                     </div>
-                    <div class="d-flex align-items-center">
-                        <span class="status <?php echo $booking['status']; ?> me-2">
+                    <div class="booking-actions">
+                        <?php if ($booking['status'] == 'pending' || $booking['status'] == 'aktif'): ?>
+                        <span class="status <?php echo $booking['status']; ?>">
                             <?php 
                             $status_icons = [
                                 'pending' => 'clock',
@@ -515,12 +632,40 @@ $stats = mysqli_fetch_assoc($statsResult);
                             echo '<i class="bi bi-' . $icon . ' me-1"></i>' . ucfirst($booking['status']); 
                             ?>
                         </span>
-                        <?php if ($booking['status'] == 'pending'): ?>
-                        <button onclick="cancelBooking(<?php echo $booking['id']; ?>)" class="btn btn-danger btn-sm">
-                            <i class="bi bi-x-circle me-1"></i>Batal
-                        </button>
+                        <?php else: ?>
+                        <span class="status <?php echo $booking['status']; ?>">
+                            <?php 
+                            $icon = $status_icons[$booking['status']] ?? 'circle';
+                            echo '<i class="bi bi-' . $icon . ' me-1"></i>' . ucfirst($booking['status']); 
+                            ?>
+                        </span>
                         <?php endif; ?>
-                    </div>
+                        
+                        <!-- Action Buttons -->
+                <?php if ($can_complete_payment): ?>
+                    <a href="complete_payment.php?id=<?php echo $booking['id']; ?>" class="btn btn-warning btn-sm">
+                        <i class="bi bi-credit-card me-1"></i>Lunasi
+                    </a>
+                    <?php endif; ?>
+
+                    <?php if ($can_cancel): ?>
+                    <button onclick="cancelBooking(<?php echo $booking['id']; ?>)" class="btn btn-danger btn-sm">
+                        <i class="bi bi-x-circle me-1"></i>Batal
+                    </button>
+                    <?php endif; ?>
+
+                    <!-- Payment Receipt Button - Fixed Logic -->
+                    <?php if ($booking['status_pembayaran'] && $booking['total_dibayar'] > 0): ?>
+                    <a href="payment_receipt.php?booking_id=<?php echo $booking['id']; ?>" class="btn btn-info btn-sm" target="_blank">
+                        <i class="bi bi-printer me-1"></i>Struk
+                    </a>
+                    <?php endif; ?>
+
+                    <!-- Detail Button untuk semua status -->
+                    <a href="booking_detail.php?id=<?php echo $booking['id']; ?>" class="btn btn-secondary btn-sm">
+                        <i class="bi bi-eye me-1"></i>Detail
+                    </a>
+                                        </div>
                 </div>
 
                 <div class="booking-info">
@@ -538,7 +683,7 @@ $stats = mysqli_fetch_assoc($statsResult);
                     </div>
                     <div class="info-item">
                         <div class="info-label">💰 Total Harga</div>
-                        <div class="info-value">Rp <?php echo number_format($booking['harga'] * $booking['lama_sewa'], 0, ',', '.'); ?></div>
+                        <div class="info-value">Rp <?php echo number_format($total_harga, 0, ',', '.'); ?></div>
                     </div>
                     <div class="info-item">
                         <div class="info-label">📱 Kontak</div>
@@ -549,6 +694,62 @@ $stats = mysqli_fetch_assoc($statsResult);
                         <div class="info-value"><?php echo date('d/m/Y H:i', strtotime($booking['created_at'])); ?></div>
                     </div>
                 </div>
+
+                <!-- Payment Information -->
+                <?php if ($booking['status_pembayaran']): ?>
+                <div class="payment-info">
+                    <h6><i class="bi bi-credit-card me-2"></i>Informasi Pembayaran</h6>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <p><strong>Status Pembayaran:</strong> 
+                                <span class="payment-status payment-<?php echo $booking['status_pembayaran']; ?>">
+                                    <?php 
+                                    if ($booking['status_pembayaran'] == 'dp') {
+                                        echo 'DP (50%) - Belum Lunas';
+                                    } elseif ($booking['status_pembayaran'] == 'lunas') {
+                                        echo 'Lunas (100%)';
+                                    } elseif ($booking['status_pembayaran'] == 'refund') {
+                                        echo 'Refund';
+                                    }
+                                    ?>
+                                </span>
+                            </p>
+                            <p><strong>Jumlah Dibayar:</strong> Rp <?php echo number_format($booking['total_dibayar'], 0, ',', '.'); ?></p>
+                        </div>
+                        <div class="col-md-6">
+                            <?php if ($booking['payment_method']): ?>
+                            <p><strong>Metode:</strong> <?php echo ucfirst($booking['payment_method']); ?></p>
+                            <?php endif; ?>
+                            <?php if ($sisa_pembayaran > 0): ?>
+                            <p><strong>Sisa Pembayaran:</strong> <span style="color: var(--warning-color);">Rp <?php echo number_format($sisa_pembayaran, 0, ',', '.'); ?></span></p>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                    
+                    <?php if ($booking['total_pinalti'] > 0): ?>
+                    <div class="alert alert-warning mt-2 mb-0">
+                        <i class="bi bi-exclamation-triangle"></i>
+                        <strong>Pinalti Pembatalan:</strong> Rp <?php echo number_format($booking['total_pinalti'], 0, ',', '.'); ?>
+                    </div>
+                    <?php endif; ?>
+                    
+                    <?php if ($booking['refund_amount'] > 0): ?>
+                    <div class="alert alert-success mt-2 mb-0">
+                        <i class="bi bi-check-circle"></i>
+                        <strong>Jumlah Refund:</strong> Rp <?php echo number_format($booking['refund_amount'], 0, ',', '.'); ?>
+                    </div>
+                    <?php endif; ?>
+                </div>
+                <?php endif; ?>
+
+                <!-- Payment Warning for DP -->
+                <?php if ($can_complete_payment): ?>
+                <div class="payment-warning">
+                    <h6><i class="bi bi-exclamation-triangle me-2"></i>Perhatian</h6>
+                    <p class="mb-2">Anda masih memiliki sisa pembayaran sebesar <strong>Rp <?php echo number_format($sisa_pembayaran, 0, ',', '.'); ?></strong></p>
+                    <p class="mb-0">Silakan lakukan pelunasan sebelum waktu bermain untuk memastikan booking Anda tetap aktif.</p>
+                </div>
+                <?php endif; ?>
             </div>
             <?php endforeach; ?>
 

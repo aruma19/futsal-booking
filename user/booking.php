@@ -62,26 +62,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $jam = sanitize_input($_POST['jam']);
     $lama_sewa = (int)$_POST['lama_sewa'];
     $kontak = sanitize_input($_POST['kontak']);
+    $payment_type = sanitize_input($_POST['payment_type']); // dp atau lunas
+    $payment_method = sanitize_input($_POST['payment_method']); // tunai, ewallet, transfer
     $id_user = $_SESSION['user_id'];
     
     // Validasi
-    if (empty($tanggal) || empty($jam) || empty($kontak)) {
+    if (empty($tanggal) || empty($jam) || empty($kontak) || empty($payment_type) || empty($payment_method)) {
         $error = 'Semua field harus diisi!';
     } elseif ($lama_sewa < 1 || $lama_sewa > 8) {
         $error = 'Lama sewa minimal 1 jam dan maksimal 8 jam!';
     } elseif (strtotime($tanggal) < strtotime(date('Y-m-d'))) {
         $error = 'Tanggal booking tidak boleh di masa lalu!';
     } else {
-        // ✅ VALIDASI STATUS LAPANGAN
-        $statusQuery = "SELECT status FROM lapangan WHERE id = $id_lapangan";
-        $statusResult = mysqli_query($connection, $statusQuery);
-        $lapanganData = mysqli_fetch_assoc($statusResult);
+        // Get lapangan data for price calculation
+        $lapanganQuery = "SELECT * FROM lapangan WHERE id = $id_lapangan AND status = 'tersedia'";
+        $lapanganResult = mysqli_query($connection, $lapanganQuery);
+        $lapanganData = mysqli_fetch_assoc($lapanganResult);
         
         if (!$lapanganData) {
-            $error = 'Lapangan tidak ditemukan!';
-        } elseif ($lapanganData['status'] != 'tersedia') {
-            $error = 'Maaf, lapangan sedang tutup/maintenance dan tidak dapat dibooking!';
+            $error = 'Lapangan tidak ditemukan atau tidak tersedia!';
         } else {
+            // Calculate total price
+            $total_harga = $lapanganData['harga'] * $lama_sewa;
+            
+            // Calculate payment amount based on type
+            if ($payment_type == 'dp') {
+                $jumlah_bayar = $total_harga * 0.5; // DP 50%
+                $status_pembayaran = 'dp';
+            } else {
+                $jumlah_bayar = $total_harga; // Full payment
+                $status_pembayaran = 'lunas';
+            }
+            
             // Validasi jam operasional (06:00 - 23:00)
             $jamStart = (int)date('H', strtotime($jam));
             $jamEnd = $jamStart + $lama_sewa;
@@ -96,13 +108,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $error = 'Maaf, waktu yang Anda pilih bertabrakan dengan booking lain. Silakan pilih waktu yang tersedia!';
                 } else {
                     // Insert booking baru
-                    $insertQuery = "INSERT INTO booking (id_user, id_lapangan, tanggal, jam, lama_sewa, kontak, status, created_at) 
-                                   VALUES ($id_user, $id_lapangan, '$tanggal', '$jam', $lama_sewa, '$kontak', 'pending', NOW())";
+                    $insertQuery = "INSERT INTO booking (id_user, id_lapangan, tanggal, jam, lama_sewa, kontak, status, status_pembayaran, total_dibayar, total_pinalti, created_at) 
+                                   VALUES ($id_user, $id_lapangan, '$tanggal', '$jam', $lama_sewa, '$kontak', 'pending', '$status_pembayaran', $jumlah_bayar, 0, NOW())";
                     
                     if (mysqli_query($connection, $insertQuery)) {
-                        $message = 'Booking berhasil dibuat! Menunggu konfirmasi admin.';
-                        // Reset form
-                        $selected_lapangan = 0;
+                        $booking_id = mysqli_insert_id($connection);
+                        
+                        // Insert payment record
+                        $paymentQuery = "INSERT INTO payments (booking_id, user_id, amount, payment_type, payment_method, status, created_at) 
+                                        VALUES ($booking_id, $id_user, $jumlah_bayar, '$payment_type', '$payment_method', 'pending', NOW())";
+                        mysqli_query($connection, $paymentQuery);
+                        
+                        // Redirect to payment confirmation
+                        header("Location: payment_confirmation.php?booking_id=$booking_id");
+                        exit();
                     } else {
                         $error = 'Terjadi kesalahan saat membuat booking: ' . mysqli_error($connection);
                     }
@@ -112,7 +131,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// ✅ AMBIL HANYA LAPANGAN YANG TERSEDIA
+// Get available fields
 $lapanganQuery = "SELECT * FROM lapangan WHERE status = 'tersedia' ORDER BY nama";
 $lapanganResult = mysqli_query($connection, $lapanganQuery);
 $lapangan_list = [];
@@ -120,7 +139,7 @@ while($row = mysqli_fetch_assoc($lapanganResult)) {
     $lapangan_list[] = $row;
 }
 
-// Ambil detail lapangan yang dipilih
+// Get selected field data
 $selected_lapangan_data = null;
 if ($selected_lapangan > 0) {
     $detailQuery = "SELECT * FROM lapangan WHERE id = $selected_lapangan AND status = 'tersedia'";
@@ -128,7 +147,6 @@ if ($selected_lapangan > 0) {
     if (mysqli_num_rows($detailResult) > 0) {
         $selected_lapangan_data = mysqli_fetch_assoc($detailResult);
     } else {
-        // ✅ REDIRECT JIKA LAPANGAN TIDAK TERSEDIA
         $error = 'Lapangan yang dipilih tidak tersedia atau sedang tutup/maintenance!';
         $selected_lapangan = 0;
     }
@@ -336,6 +354,77 @@ if ($selected_lapangan > 0) {
             font-weight: 700;
         }
 
+        .payment-section {
+            background: #e8f5e8;
+            padding: 20px;
+            border-radius: var(--border-radius);
+            margin: 20px 0;
+            border-left: 4px solid var(--success-color);
+        }
+
+        .payment-section h5 {
+            color: var(--success-color);
+            font-weight: 600;
+            margin-bottom: 15px;
+        }
+
+        .payment-options {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 15px 0;
+        }
+
+        .payment-option {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            border: 2px solid #ddd;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-align: center;
+        }
+
+        .payment-option:hover {
+            border-color: var(--primary-color);
+            background: #f0f8ff;
+        }
+
+        .payment-option.selected {
+            border-color: var(--primary-color);
+            background: var(--primary-color);
+            color: white;
+        }
+
+        .payment-method {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+            margin: 15px 0;
+        }
+
+        .method-option {
+            background: white;
+            padding: 12px;
+            border-radius: 8px;
+            border: 2px solid #ddd;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-align: center;
+            font-size: 0.9rem;
+        }
+
+        .method-option:hover {
+            border-color: var(--success-color);
+            background: #f0fff0;
+        }
+
+        .method-option.selected {
+            border-color: var(--success-color);
+            background: var(--success-color);
+            color: white;
+        }
+
         .time-slots {
             background: #fff3cd;
             padding: 20px;
@@ -467,7 +556,7 @@ if ($selected_lapangan > 0) {
         <!-- Page Header -->
         <div class="page-header fade-in">
             <h1><i class="bi bi-calendar-plus me-2"></i>Booking Lapangan Futsal</h1>
-            <p class="mb-0">Pilih lapangan dan waktu yang tersedia</p>
+            <p class="mb-0">Pilih lapangan, waktu, dan metode pembayaran</p>
             <small class="text-muted">Hanya menampilkan lapangan yang sedang tersedia</small>
         </div>
 
@@ -484,7 +573,7 @@ if ($selected_lapangan > 0) {
         </div>
         <?php endif; ?>
 
-        <!-- ✅ CHECK IF NO AVAILABLE FIELDS -->
+        <!-- Check if no available fields -->
         <?php if (empty($lapangan_list)): ?>
         <div class="empty-state fade-in">
             <i class="bi bi-geo-alt-fill"></i>
@@ -594,13 +683,59 @@ if ($selected_lapangan > 0) {
                     </div>
                 </div>
 
+                <!-- Payment Section -->
+                <div class="form-section">
+                    <h4><i class="bi bi-credit-card me-2"></i>Opsi Pembayaran</h4>
+                    
+                    <!-- Payment Type -->
+                    <div class="payment-section">
+                        <h5><i class="bi bi-cash-coin me-2"></i>Jenis Pembayaran</h5>
+                        <div class="payment-options">
+                            <div class="payment-option" onclick="selectPaymentType('dp')" id="paymentDP">
+                                <i class="bi bi-piggy-bank fs-2"></i>
+                                <h6 class="mt-2">DP (50%)</h6>
+                                <p class="mb-0">Bayar setengah sekarang</p>
+                                <small>Sisa dapat dibayar nanti</small>
+                            </div>
+                            <div class="payment-option" onclick="selectPaymentType('lunas')" id="paymentLunas">
+                                <i class="bi bi-cash-stack fs-2"></i>
+                                <h6 class="mt-2">Lunas (100%)</h6>
+                                <p class="mb-0">Bayar penuh sekarang</p>
+                                <small>Tidak ada sisa pembayaran</small>
+                            </div>
+                        </div>
+                        <input type="hidden" name="payment_type" id="paymentType" required>
+                    </div>
+
+                    <!-- Payment Method -->
+                    <div class="payment-section">
+                        <h5><i class="bi bi-wallet2 me-2"></i>Metode Pembayaran</h5>
+                        <div class="payment-method">
+                            <div class="method-option" onclick="selectPaymentMethod('tunai')" id="methodTunai">
+                                <i class="bi bi-cash me-1"></i>Tunai
+                            </div>
+                            <div class="method-option" onclick="selectPaymentMethod('ewallet')" id="methodEwallet">
+                                <i class="bi bi-phone me-1"></i>E-Wallet
+                            </div>
+                            <div class="method-option" onclick="selectPaymentMethod('transfer')" id="methodTransfer">
+                                <i class="bi bi-bank me-1"></i>Transfer Bank
+                            </div>
+                        </div>
+                        <input type="hidden" name="payment_method" id="paymentMethod" required>
+                        <small class="text-muted">
+                            <i class="bi bi-info-circle me-1"></i>
+                            Pembayaran tunai hanya tersedia untuk booking baru. Pelunasan hanya bisa melalui E-Wallet atau Transfer.
+                        </small>
+                    </div>
+                </div>
+
                 <!-- Contact Info -->
                 <div class="form-section">
                     <h4><i class="bi bi-telephone me-2"></i>Informasi Kontak</h4>
                     <div class="mb-3">
                         <label class="form-label">Nomor Telepon/WhatsApp</label>
                         <input type="tel" class="form-control" name="kontak" placeholder="Contoh: 08123456789" required>
-                        <small class="text-muted">Nomor ini akan digunakan untuk konfirmasi booking</small>
+                        <small class="text-muted">Nomor ini akan digunakan untuk konfirmasi booking dan pembayaran</small>
                     </div>
                 </div>
 
@@ -624,15 +759,23 @@ if ($selected_lapangan > 0) {
                         <span id="summaryDurasi">-</span>
                     </div>
                     <div class="summary-item">
-                        <span><strong>Total Harga:</strong></span>
-                        <span><strong>Rp <span id="totalHarga">0</span></strong></span>
+                        <span>Total Harga:</span>
+                        <span>Rp <span id="totalHarga">0</span></span>
+                    </div>
+                    <div class="summary-item">
+                        <span>Jenis Pembayaran:</span>
+                        <span id="summaryPaymentType">-</span>
+                    </div>
+                    <div class="summary-item">
+                        <span><strong>Jumlah Dibayar:</strong></span>
+                        <span><strong>Rp <span id="jumlahBayar">0</span></strong></span>
                     </div>
                 </div>
 
                 <!-- Submit Button -->
                 <div class="text-center mt-4">
                     <button type="submit" class="btn btn-primary btn-lg">
-                        <i class="bi bi-calendar-check me-2"></i>Buat Booking
+                        <i class="bi bi-credit-card-2-front me-2"></i>Lanjut ke Pembayaran
                     </button>
                     <a href="lihat_lapangan.php" class="btn btn-secondary btn-lg ms-2">
                         <i class="bi bi-arrow-left me-2"></i>Kembali
@@ -672,7 +815,6 @@ if ($selected_lapangan > 0) {
             
             if (lapanganId && tanggal) {
                 try {
-                    // Fetch booked slots for this date
                     const response = await fetch(`get_booked_slots.php?lapangan=${lapanganId}&date=${tanggal}`);
                     const data = await response.json();
                     bookedSlots = data.bookedSlots || [];
@@ -691,10 +833,9 @@ if ($selected_lapangan > 0) {
             const slotsGrid = document.getElementById('slotsGrid');
             slotsGrid.innerHTML = '';
             
-            // Generate time slots from 6:00 to 22:00
             for (let hour = 6; hour <= 22; hour++) {
                 const timeStr = String(hour).padStart(2, '0') + ':00';
-                const isBooked = isTimeSlotBooked(hour * 60, 60); // Check if this hour is booked
+                const isBooked = isTimeSlotBooked(hour * 60, 60);
                 
                 const slotElement = document.createElement('div');
                 slotElement.className = `time-slot ${isBooked ? 'slot-booked' : 'slot-available'}`;
@@ -712,13 +853,40 @@ if ($selected_lapangan > 0) {
             });
         }
 
+        function selectPaymentType(type) {
+            // Reset all payment options
+            document.querySelectorAll('.payment-option').forEach(option => {
+                option.classList.remove('selected');
+            });
+            
+            // Select clicked option
+            document.getElementById('payment' + type.toUpperCase()).classList.add('selected');
+            document.getElementById('paymentType').value = type;
+            
+            calculateTotal();
+        }
+
+        function selectPaymentMethod(method) {
+            // Reset all method options
+            document.querySelectorAll('.method-option').forEach(option => {
+                option.classList.remove('selected');
+            });
+            
+            // Select clicked option
+            document.getElementById('method' + method.charAt(0).toUpperCase() + method.slice(1)).classList.add('selected');
+            document.getElementById('paymentMethod').value = method;
+            
+            calculateTotal();
+        }
+
         function calculateTotal() {
             const lapanganSelect = document.getElementById('lapanganSelect');
             const tanggal = document.getElementById('tanggal').value;
             const jam = document.getElementById('jam').value;
             const lamaSewa = document.getElementById('lamaSewa').value;
+            const paymentType = document.getElementById('paymentType').value;
             
-            if (lapanganSelect.value && tanggal && jam && lamaSewa) {
+            if (lapanganSelect.value && tanggal && jam && lamaSewa && paymentType) {
                 // Check if selected time conflicts with existing bookings
                 const jamHour = parseInt(jam.split(':')[0]);
                 const jamMinutes = jamHour * 60;
@@ -747,12 +915,22 @@ if ($selected_lapangan > 0) {
                 const harga = parseInt(option.dataset.harga);
                 const total = harga * parseInt(lamaSewa);
                 
+                let jumlahBayar = total;
+                let paymentTypeText = 'Lunas';
+                
+                if (paymentType === 'dp') {
+                    jumlahBayar = Math.round(total * 0.5);
+                    paymentTypeText = 'DP (50%)';
+                }
+                
                 // Update summary
                 document.getElementById('summaryLapangan').textContent = option.dataset.nama;
                 document.getElementById('summaryTanggal').textContent = formatDate(tanggal);
                 document.getElementById('summaryWaktu').textContent = jam + ' - ' + addHours(jam, parseInt(lamaSewa)) + ' WIB';
                 document.getElementById('summaryDurasi').textContent = lamaSewa + ' jam';
                 document.getElementById('totalHarga').textContent = formatNumber(total);
+                document.getElementById('summaryPaymentType').textContent = paymentTypeText;
+                document.getElementById('jumlahBayar').textContent = formatNumber(jumlahBayar);
                 
                 document.getElementById('bookingSummary').style.display = 'block';
             } else {
@@ -790,6 +968,8 @@ if ($selected_lapangan > 0) {
             const tanggal = document.getElementById('tanggal').value;
             const jam = document.getElementById('jam').value;
             const lamaSewa = document.getElementById('lamaSewa').value;
+            const paymentType = document.getElementById('paymentType').value;
+            const paymentMethod = document.getElementById('paymentMethod').value;
             const today = new Date().toISOString().split('T')[0];
             
             if (tanggal < today) {
@@ -798,6 +978,26 @@ if ($selected_lapangan > 0) {
                     icon: 'error',
                     title: 'Tanggal Tidak Valid',
                     text: 'Tanggal booking tidak boleh di masa lalu!'
+                });
+                return false;
+            }
+
+            if (!paymentType) {
+                e.preventDefault();
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Pilih Jenis Pembayaran',
+                    text: 'Silakan pilih jenis pembayaran (DP atau Lunas)!'
+                });
+                return false;
+            }
+
+            if (!paymentMethod) {
+                e.preventDefault();
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Pilih Metode Pembayaran',
+                    text: 'Silakan pilih metode pembayaran!'
                 });
                 return false;
             }
