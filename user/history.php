@@ -660,11 +660,6 @@ $stats = mysqli_fetch_assoc($statsResult);
                         <i class="bi bi-printer me-1"></i>Struk
                     </a>
                     <?php endif; ?>
-
-                    <!-- Detail Button untuk semua status -->
-                    <a href="booking_detail.php?id=<?php echo $booking['id']; ?>" class="btn btn-secondary btn-sm">
-                        <i class="bi bi-eye me-1"></i>Detail
-                    </a>
                                         </div>
                 </div>
 

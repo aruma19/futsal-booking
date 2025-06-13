@@ -826,13 +826,6 @@ $stats = mysqli_fetch_assoc($statsResult);
                     </button>
                     <?php endif; ?>
 
-                    <a href="payment_receipt.php?booking_id=<?php echo $booking['id']; ?>" target="_blank" class="btn btn-info btn-sm">
-                        <i class="bi bi-receipt me-1"></i>Lihat Struk
-                    </a>
-
-                    <button onclick="viewDetail(<?php echo $booking['id']; ?>)" class="btn btn-secondary btn-sm">
-                        <i class="bi bi-eye me-1"></i>Detail
-                    </button>
                 </div>
             </div>
             <?php endforeach; ?>

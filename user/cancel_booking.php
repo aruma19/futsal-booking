@@ -7,6 +7,21 @@ if (!isset($_SESSION['user_id'])) {
 
 include('../config/database.php');
 
+// Fungsi sanitize yang hilang
+// Fungsi sanitize dengan check
+if (!function_exists('sanitize_input')) {
+    function sanitize_input($data) {
+        global $connection;
+        if (empty($data)) {
+            return '';
+        }
+        $data = trim($data);
+        $data = stripslashes($data);
+        $data = htmlspecialchars($data);
+        return mysqli_real_escape_string($connection, $data);
+    }
+}
+
 $message = '';
 $error = '';
 $booking_id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
@@ -17,7 +32,7 @@ if ($booking_id <= 0) {
     exit();
 }
 
-// Get booking details
+// Get booking details with improved error handling
 $query = "
     SELECT 
         b.*,
@@ -29,11 +44,18 @@ $query = "
     FROM booking b 
     JOIN lapangan l ON b.id_lapangan = l.id 
     JOIN users u ON b.id_user = u.id
-    WHERE b.id = $booking_id AND b.id_user = $user_id 
+    WHERE b.id = ? AND b.id_user = ? 
     AND b.status IN ('pending', 'aktif')
 ";
 
-$result = mysqli_query($connection, $query);
+$stmt = mysqli_prepare($connection, $query);
+if (!$stmt) {
+    die('Query preparation failed: ' . mysqli_error($connection));
+}
+
+mysqli_stmt_bind_param($stmt, "ii", $booking_id, $user_id);
+mysqli_stmt_execute($stmt);
+$result = mysqli_stmt_get_result($stmt);
 $booking = mysqli_fetch_assoc($result);
 
 if (!$booking) {
@@ -78,56 +100,108 @@ if ($booking['status'] == 'pending') {
     }
 }
 
-// Handle cancellation
+// Handle cancellation with improved error handling
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_cancel'])) {
-    $user_reason = sanitize_input($_POST['reason']);
-    $combined_reason = $refund_reason . '. Alasan user: ' . $user_reason;
     
-    // Start transaction
-    mysqli_begin_transaction($connection);
-    
-    try {
-        // Update booking status
-        $updateBooking = "UPDATE booking SET 
-                         status = 'batal', 
-                         total_pinalti = $penalty_amount, 
-                         cancelled_at = NOW(),
-                         cancelled_reason = '$combined_reason'
-                         WHERE id = $booking_id";
+    // Validate inputs
+    if (empty($_POST['reason'])) {
+        $error = 'Alasan pembatalan wajib diisi';
+    } else if (!isset($_POST['confirmUnderstand']) || !isset($_POST['confirmRefund']) || !isset($_POST['confirmFinal'])) {
+        $error = 'Semua konfirmasi harus dicentang';
+    } else {
         
-        if (!mysqli_query($connection, $updateBooking)) {
-            throw new Exception('Gagal mengupdate status booking');
-        }
+        $user_reason = sanitize_input($_POST['reason']);
+        $combined_reason = sanitize_input($refund_reason . '. Alasan user: ' . $user_reason);
         
-        // Insert refund record if there's refund
-        if ($refund_amount > 0) {
-            $refundQuery = "INSERT INTO refunds (booking_id, user_id, refund_amount, penalty_amount, reason, status, created_at) 
-                           VALUES ($booking_id, $user_id, $refund_amount, $penalty_amount, '$combined_reason', 'pending', NOW())";
+        // Start transaction
+        mysqli_autocommit($connection, false);
+        
+        try {
+            // Check if booking still exists and can be cancelled
+            $checkQuery = "SELECT status FROM booking WHERE id = ? AND id_user = ? AND status IN ('pending', 'aktif')";
+            $checkStmt = mysqli_prepare($connection, $checkQuery);
+            mysqli_stmt_bind_param($checkStmt, "ii", $booking_id, $user_id);
+            mysqli_stmt_execute($checkStmt);
+            $checkResult = mysqli_stmt_get_result($checkStmt);
             
-            if (!mysqli_query($connection, $refundQuery)) {
-                throw new Exception('Gagal membuat record refund');
+            if (mysqli_num_rows($checkResult) == 0) {
+                throw new Exception('Booking tidak ditemukan atau sudah tidak dapat dibatalkan');
             }
+            
+            // Update booking status using prepared statement
+            $updateBooking = "UPDATE booking SET 
+                             status = 'batal', 
+                             total_pinalti = ?, 
+                             cancelled_at = NOW(),
+                             cancelled_reason = ?
+                             WHERE id = ? AND id_user = ?";
+            
+            $updateStmt = mysqli_prepare($connection, $updateBooking);
+            if (!$updateStmt) {
+                throw new Exception('Gagal mempersiapkan query update: ' . mysqli_error($connection));
+            }
+            
+            mysqli_stmt_bind_param($updateStmt, "dsii", $penalty_amount, $combined_reason, $booking_id, $user_id);
+            
+            if (!mysqli_stmt_execute($updateStmt)) {
+                throw new Exception('Gagal mengupdate status booking: ' . mysqli_stmt_error($updateStmt));
+            }
+            
+            if (mysqli_stmt_affected_rows($updateStmt) == 0) {
+                throw new Exception('Tidak ada booking yang diupdate');
+            }
+            
+            // Insert refund record if there's refund
+            if ($refund_amount > 0) {
+                $refundQuery = "INSERT INTO refunds (booking_id, user_id, refund_amount, penalty_amount, reason, status, created_at) 
+                               VALUES (?, ?, ?, ?, ?, 'pending', NOW())";
+                
+                $refundStmt = mysqli_prepare($connection, $refundQuery);
+                if (!$refundStmt) {
+                    throw new Exception('Gagal mempersiapkan query refund: ' . mysqli_error($connection));
+                }
+                
+                mysqli_stmt_bind_param($refundStmt, "iidds", $booking_id, $user_id, $refund_amount, $penalty_amount, $combined_reason);
+                
+                if (!mysqli_stmt_execute($refundStmt)) {
+                    throw new Exception('Gagal membuat record refund: ' . mysqli_stmt_error($refundStmt));
+                }
+            }
+            
+            // Insert notification
+            $notif_title = 'Booking Dibatalkan';
+            $notif_message = "Booking #" . str_pad($booking_id, 6, '0', STR_PAD_LEFT) . " telah dibatalkan. Refund: Rp " . number_format($refund_amount, 0, ',', '.') . 
+                            " | Penalty: Rp " . number_format($penalty_amount, 0, ',', '.');
+            
+            $notifQuery = "INSERT INTO notifications (user_id, booking_id, title, message, type, created_at) 
+                          VALUES (?, ?, ?, ?, 'warning', NOW())";
+            
+            $notifStmt = mysqli_prepare($connection, $notifQuery);
+            if ($notifStmt) {
+                mysqli_stmt_bind_param($notifStmt, "iiss", $user_id, $booking_id, $notif_title, $notif_message);
+                mysqli_stmt_execute($notifStmt);
+                // Don't throw error if notification fails, it's not critical
+            }
+            
+            // Commit transaction
+            mysqli_commit($connection);
+            mysqli_autocommit($connection, true);
+            
+            // Add success session message
+            $_SESSION['success_message'] = 'Booking berhasil dibatalkan';
+            
+            // Redirect to success page
+            header("Location: cancel_success.php?booking_id=$booking_id&refund=$refund_amount&penalty=$penalty_amount");
+            exit();
+            
+        } catch (Exception $e) {
+            mysqli_rollback($connection);
+            mysqli_autocommit($connection, true);
+            $error = 'Pembatalan gagal: ' . $e->getMessage();
+            
+            // Log error for debugging
+            error_log("Cancel booking error for booking_id $booking_id: " . $e->getMessage());
         }
-        
-        // Insert notification
-        $notif_title = 'Booking Dibatalkan';
-        $notif_message = "Booking #{$booking_id} telah dibatalkan. Refund: Rp " . number_format($refund_amount, 0, ',', '.') . 
-                        " | Penalty: Rp " . number_format($penalty_amount, 0, ',', '.');
-        
-        $notifQuery = "INSERT INTO notifications (user_id, booking_id, title, message, type, created_at) 
-                      VALUES ($user_id, $booking_id, '$notif_title', '$notif_message', 'warning', NOW())";
-        mysqli_query($connection, $notifQuery);
-        
-        // Commit transaction
-        mysqli_commit($connection);
-        
-        // Redirect to success page
-        header("Location: cancel_success.php?booking_id=$booking_id&refund=$refund_amount&penalty=$penalty_amount");
-        exit();
-        
-    } catch (Exception $e) {
-        mysqli_rollback($connection);
-        $error = $e->getMessage();
     }
 }
 ?>
@@ -406,8 +480,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_cancel'])) {
 </head>
 
 <body>
-    <?php include 'user_sidebar.php'; ?>
-    
     <div class="container">
         <div class="cancel-card">
             <!-- Warning Header -->
@@ -423,6 +495,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_cancel'])) {
             <?php if ($error): ?>
             <div class="alert alert-danger">
                 <i class="bi bi-exclamation-circle"></i><?php echo $error; ?>
+            </div>
+            <?php endif; ?>
+
+            <!-- Success Message -->
+            <?php if (isset($_SESSION['success_message'])): ?>
+            <div class="alert alert-success">
+                <i class="bi bi-check-circle"></i><?php echo $_SESSION['success_message']; unset($_SESSION['success_message']); ?>
             </div>
             <?php endif; ?>
 
@@ -552,21 +631,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_cancel'])) {
                 <div class="confirmation-box">
                     <h5><i class="bi bi-check-square me-2"></i>Konfirmasi Pembatalan</h5>
                     <div class="form-check">
-                        <input class="form-check-input" type="checkbox" id="confirmUnderstand" required>
+                        <input class="form-check-input" type="checkbox" id="confirmUnderstand" name="confirmUnderstand" value="1" required>
                         <label class="form-check-label" for="confirmUnderstand">
                             Saya memahami bahwa pembatalan ini akan mengenakan penalty sebesar 
                             <strong>Rp <?php echo number_format($penalty_amount, 0, ',', '.'); ?></strong>
                         </label>
                     </div>
                     <div class="form-check">
-                        <input class="form-check-input" type="checkbox" id="confirmRefund" required>
+                        <input class="form-check-input" type="checkbox" id="confirmRefund" name="confirmRefund" value="1" required>
                         <label class="form-check-label" for="confirmRefund">
                             Saya memahami bahwa refund yang akan diterima adalah 
                             <strong>Rp <?php echo number_format($refund_amount, 0, ',', '.'); ?></strong>
                         </label>
                     </div>
                     <div class="form-check">
-                        <input class="form-check-input" type="checkbox" id="confirmFinal" required>
+                        <input class="form-check-input" type="checkbox" id="confirmFinal" name="confirmFinal" value="1" required>
                         <label class="form-check-label" for="confirmFinal">
                             Saya memahami bahwa pembatalan ini bersifat final dan tidak dapat dibatalkan
                         </label>
@@ -613,22 +692,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_cancel'])) {
         const checkboxes = document.querySelectorAll('.confirmation-box input[type="checkbox"]');
         const cancelBtn = document.getElementById('cancelBtn');
 
+        function validateForm() {
+            const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+            const reasonFilled = document.getElementById('reasonText').value.trim().length > 0;
+            cancelBtn.disabled = !(allChecked && reasonFilled);
+        }
+
         checkboxes.forEach(checkbox => {
-            checkbox.addEventListener('change', function() {
-                const allChecked = Array.from(checkboxes).every(cb => cb.checked);
-                const reasonFilled = document.getElementById('reasonText').value.trim().length > 0;
-                
-                cancelBtn.disabled = !(allChecked && reasonFilled);
-            });
+            checkbox.addEventListener('change', validateForm);
         });
 
         // Handle reason text change
-        document.getElementById('reasonText').addEventListener('input', function() {
-            const allChecked = Array.from(checkboxes).every(cb => cb.checked);
-            const reasonFilled = this.value.trim().length > 0;
-            
-            cancelBtn.disabled = !(allChecked && reasonFilled);
-        });
+        document.getElementById('reasonText').addEventListener('input', validateForm);
 
         // Form submission confirmation
         document.getElementById('cancelForm').addEventListener('submit', function(e) {
@@ -670,11 +745,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_cancel'])) {
             });
         });
 
-        // Prevent accidental page refresh
-        window.addEventListener('beforeunload', function (e) {
-            e.preventDefault();
-            e.returnValue = '';
-        });
+        // Auto-fill form for testing (remove in production)
+        <?php if (isset($_GET['debug']) && $_GET['debug'] == 'true'): ?>
+        setTimeout(() => {
+            document.getElementById('reasonText').value = 'Testing pembatalan booking';
+            document.getElementById('confirmUnderstand').checked = true;
+            document.getElementById('confirmRefund').checked = true;
+            document.getElementById('confirmFinal').checked = true;
+            validateForm();
+        }, 1000);
+        <?php endif; ?>
     </script>
 </body>
 </html>

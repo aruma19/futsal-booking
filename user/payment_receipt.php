@@ -535,9 +535,6 @@ if ($download_pdf) {
             <a href="javascript:window.print()" class="btn">
                 🖨️ Cetak Struk
             </a>
-            <a href="?booking_id=<?php echo $booking_id; ?>&download=pdf" class="btn btn-success">
-                📄 Download PDF
-            </a>
             <a href="history.php" class="btn">
                 ← Kembali ke Riwayat
             </a>

@@ -120,7 +120,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         mysqli_query($connection, $paymentQuery);
                         
                         // Redirect to payment confirmation
-                        header("Location: payment_confirmation.php?booking_id=$booking_id");
+                        header("Location: complete_payment.php?booking_id=$booking_id");
                         exit();
                     } else {
                         $error = 'Terjadi kesalahan saat membuat booking: ' . mysqli_error($connection);

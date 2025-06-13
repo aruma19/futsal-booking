@@ -51,7 +51,7 @@ if (!$booking) {
 $total_harga = $booking['harga'] * $booking['lama_sewa'];
 $sisa_pembayaran = $total_harga - $booking['total_dibayar'];
 
-// Handle payment completion
+// Handle payment completion - FIXED VERSION (NO NOTIFICATIONS)
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $payment_method = sanitize_input($_POST['payment_method']);
     
@@ -59,30 +59,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!in_array($payment_method, ['ewallet', 'transfer'])) {
         $error = 'Metode pembayaran tidak valid untuk pelunasan!';
     } else {
-        // Insert new payment record for completion
-        $insertPayment = "INSERT INTO payments (booking_id, user_id, amount, payment_type, payment_method, status, created_at) 
-                         VALUES ($booking_id, $user_id, $sisa_pembayaran, 'lunas', '$payment_method', 'pending', NOW())";
+        // Start transaction for data consistency
+        mysqli_begin_transaction($connection);
         
-        if (mysqli_query($connection, $insertPayment)) {
-            // Update booking
+        try {
+            // Insert new payment record for completion (sisa pembayaran)
+            $insertPayment = "INSERT INTO payments (booking_id, user_id, amount, payment_type, payment_method, status, created_at) 
+                             VALUES ($booking_id, $user_id, $sisa_pembayaran, 'pelunasan', '$payment_method', 'completed', NOW())";
+            
+            if (!mysqli_query($connection, $insertPayment)) {
+                throw new Exception('Gagal menyimpan data pembayaran: ' . mysqli_error($connection));
+            }
+            
+            // Update booking - change status_pembayaran to 'lunas' and update total_dibayar
             $updateBooking = "UPDATE booking SET 
                              status_pembayaran = 'lunas', 
                              total_dibayar = $total_harga 
                              WHERE id = $booking_id";
             
-            if (mysqli_query($connection, $updateBooking)) {
-                // Update payment status to completed
-                $updatePayment = "UPDATE payments SET status = 'completed' WHERE booking_id = $booking_id";
-                mysqli_query($connection, $updatePayment);
-                
-                // Redirect to success page
-                header("Location: payment_success.php?booking_id=$booking_id&type=completion");
-                exit();
-            } else {
-                $error = 'Gagal memperbarui status booking: ' . mysqli_error($connection);
+            if (!mysqli_query($connection, $updateBooking)) {
+                throw new Exception('Gagal memperbarui status booking: ' . mysqli_error($connection));
             }
-        } else {
-            $error = 'Gagal menyimpan data pembayaran: ' . mysqli_error($connection);
+            
+            // Update ALL payment records for this booking to 'completed' status
+            $updateAllPayments = "UPDATE payments SET status = 'completed' WHERE booking_id = $booking_id";
+            if (!mysqli_query($connection, $updateAllPayments)) {
+                throw new Exception('Gagal memperbarui status pembayaran: ' . mysqli_error($connection));
+            }
+            
+            // Commit transaction
+            mysqli_commit($connection);
+            
+            // Redirect to success page
+            header("Location: payment_success.php?booking_id=$booking_id&type=completion");
+            exit();
+            
+        } catch (Exception $e) {
+            // Rollback transaction on error
+            mysqli_rollback($connection);
+            $error = $e->getMessage();
         }
     }
 }
@@ -340,8 +355,6 @@ $hours_remaining = $time_remaining / 3600;
 </head>
 
 <body>
-    <?php include 'user_sidebar.php'; ?>
-    
     <div class="container">
         <div class="payment-card">
             <!-- Header -->
@@ -585,4 +598,4 @@ $hours_remaining = $time_remaining / 3600;
         <?php endif; ?>
     </script>
 </body>
-</html>
+</html> 

@@ -41,15 +41,6 @@ if (!$booking) {
 
 $total_harga = $booking['harga'] * $booking['lama_sewa'];
 
-// Insert notification
-$notification_title = ($type == 'completion') ? 'Pelunasan Berhasil!' : 'Booking Berhasil Dibuat!';
-$notification_message = ($type == 'completion') ? 
-    "Pelunasan booking #{$booking_id} berhasil. Status booking: Lunas. Silakan datang sesuai jadwal." :
-    "Booking #{$booking_id} berhasil dibuat. Menunggu konfirmasi admin.";
-
-$notifQuery = "INSERT INTO notifications (user_id, booking_id, title, message, type, created_at) 
-               VALUES ($user_id, $booking_id, '$notification_title', '$notification_message', 'success', NOW())";
-mysqli_query($connection, $notifQuery);
 ?>
 
 <!DOCTYPE html>
